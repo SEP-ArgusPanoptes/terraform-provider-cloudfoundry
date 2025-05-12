@@ -1,7 +1,7 @@
 package cloudfoundry
 
 import (
-	"code.cloudfoundry.org/cli/api/cloudcontroller/ccv2"
+	"code.cloudfoundry.org/cli/api/cloudcontroller/ccv2/constant"
 	"fmt"
 	"github.com/terraform-providers/terraform-provider-cloudfoundry/cloudfoundry/managers"
 	"testing"
@@ -10,64 +10,55 @@ import (
 	"github.com/hashicorp/terraform-plugin-sdk/v2/terraform"
 )
 
-const orgDataResource = `
+const orgQuotaDataResource = `
 
-resource "cloudfoundry_org" "myorg" {
-	name = "myorg-ds-org"
+resource "cloudfoundry_org_quota" "q" {
+  name = "100g-org-ds"
+  allow_paid_service_plans = false
+  instance_memory = 2048
+  total_memory = 51200
+  total_app_instances = 100
+  total_routes = 50
+  total_services = 200
+  total_route_ports = 5
 }
 
-data "cloudfoundry_org" "dd" {
-    name = "${cloudfoundry_org.myorg.name}"
+data "cloudfoundry_org_quota" "qq" {
+  name = "${cloudfoundry_org_quota.q.name}"
 }
 `
 
-func TestAccDataSourceOrg_normal(t *testing.T) {
-
-	ref := "data.cloudfoundry_org.dd"
-
+func TestAccDataSourceOrgQuota_normal(t *testing.T) {
+	ref := "data.cloudfoundry_org_quota.qq"
 	resource.ParallelTest(t,
 		resource.TestCase{
 			PreCheck:          func() { testAccPreCheck(t) },
 			ProviderFactories: testAccProvidersFactories,
 			Steps: []resource.TestStep{
-
 				resource.TestStep{
-					Config: orgDataResource,
+					Config: orgQuotaDataResource,
 					Check: resource.ComposeTestCheckFunc(
-						checkDataSourceOrgExists(ref),
+						checkDataSourceOrgQuotaExists(ref),
 						resource.TestCheckResourceAttr(
-							ref, "name", "myorg-ds-org"),
+							ref, "name", "100g-org-ds"),
 					),
 				},
 			},
 		})
 }
 
-func checkDataSourceOrgExists(resource string) resource.TestCheckFunc {
-
+func checkDataSourceOrgQuotaExists(resource string) resource.TestCheckFunc {
 	return func(s *terraform.State) error {
-
 		session := testAccProvider.Meta().(*managers.Session)
-
 		rs, ok := s.RootModule().Resources[resource]
 		if !ok {
-			return fmt.Errorf("org '%s' not found in terraform state", resource)
+			return fmt.Errorf("quota '%s' not found in terraform state", resource)
 		}
-
 		id := rs.Primary.ID
-		name := rs.Primary.Attributes["name"]
-
-		orgs, _, err := session.ClientV2.GetOrganizations(ccv2.FilterByName(name))
-		if err != nil {
-			return err
-		}
-		if len(orgs) == 0 {
-			return NotFound
-		}
-		if err := assertSame(id, orgs[0].GUID); err != nil {
-			return err
-		}
-
-		return nil
+		var (
+			err error
+		)
+		_, _, err = session.ClientV2.GetQuota(constant.OrgQuota, id)
+		return err
 	}
 }

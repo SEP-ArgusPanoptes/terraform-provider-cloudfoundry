@@ -1,112 +1,69 @@
 package cloudfoundry
 
 import (
-	"context"
 	"fmt"
-	"strings"
-
-	"code.cloudfoundry.org/cli/api/cloudcontroller/ccv3"
-	"github.com/hashicorp/terraform-plugin-log/tflog"
-	"github.com/hashicorp/terraform-plugin-sdk/v2/diag"
 	"github.com/terraform-providers/terraform-provider-cloudfoundry/cloudfoundry/managers"
+	"testing"
 
-	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/resource"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/terraform"
 )
 
-func dataSourceService() *schema.Resource {
+const routerGroupDataResource = `
 
-	return &schema.Resource{
+data "cloudfoundry_router_group" "rg" {
+    name = "default-tcp"
+}
+`
 
-		ReadContext: dataSourceServiceRead,
+func TestAccDataSourceRouterGroup_normal(t *testing.T) {
 
-		Schema: map[string]*schema.Schema{
+	ref := "data.cloudfoundry_router_group.rg"
 
-			"name": &schema.Schema{
-				Type:     schema.TypeString,
-				Required: true,
+	resource.ParallelTest(t,
+		resource.TestCase{
+			PreCheck:          func() { testAccPreCheck(t) },
+			ProviderFactories: testAccProvidersFactories,
+			Steps: []resource.TestStep{
+
+				resource.TestStep{
+					Config: routerGroupDataResource,
+					Check: resource.ComposeTestCheckFunc(
+						checkDataSourceRouterGroupExists(ref),
+						resource.TestCheckResourceAttr(
+							ref, "name", "default-tcp"),
+					),
+				},
 			},
-			"space": &schema.Schema{
-				Type:     schema.TypeString,
-				Optional: true,
-				Default:  "",
-			},
-			"service_broker_guid": &schema.Schema{
-				Type:     schema.TypeString,
-				Optional: true,
-				Default:  "",
-			},
-			"service_broker_name": &schema.Schema{
-				Type:     schema.TypeString,
-				Computed: true,
-			},
-			"service_plans": &schema.Schema{
-				Type:     schema.TypeMap,
-				Computed: true,
-			},
-		},
-	}
+		})
 }
 
-func dataSourceServiceRead(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
-	session := meta.(*managers.Session)
+func checkDataSourceRouterGroupExists(resource string) resource.TestCheckFunc {
 
-	name := d.Get("name").(string)
-	space := d.Get("space").(string)
-	serviceBrokerGUID := d.Get("service_broker_guid").(string)
+	return func(s *terraform.State) error {
 
-	filters := []ccv3.Query{}
+		session := testAccProvider.Meta().(*managers.Session)
 
-	// Add required filter
-	filters = append(filters, ccv3.Query{
-		Key:    ccv3.NameFilter,
-		Values: []string{name},
-	})
+		rs, ok := s.RootModule().Resources[resource]
+		if !ok {
+			return fmt.Errorf("router_group '%s' not found in terraform state", resource)
+		}
 
-	if serviceBrokerGUID != "" {
-		filters = append(filters, ccv3.Query{
-			Key:    ccv3.ServiceBrokerGUIDsFilter,
-			Values: []string{serviceBrokerGUID},
-		})
+		id := rs.Primary.ID
+		name := rs.Primary.Attributes["name"]
+		rgType := rs.Primary.Attributes["type"]
+
+		routerGroup, err := session.RouterClient.GetRouterGroupByName(name)
+		if err != nil {
+			return err
+		}
+		if err := assertSame(id, routerGroup.GUID); err != nil {
+			return err
+		}
+		if err := assertSame(rgType, routerGroup.Type); err != nil {
+			return err
+		}
+
+		return nil
 	}
-
-	if space != "" {
-		filters = append(filters, ccv3.Query{
-			Key:    ccv3.SpaceGUIDFilter,
-			Values: []string{space},
-		})
-	}
-
-	tflog.Debug(ctx, fmt.Sprintf("%+v", filters))
-
-	services, _, err := session.ClientV3.GetServiceOfferings(filters...)
-	if err != nil {
-		return diag.FromErr(err)
-	}
-	if len(services) == 0 {
-		return diag.FromErr(NotFound)
-	}
-	service := services[0]
-
-	d.SetId(service.GUID)
-	if serviceBrokerGUID == "" {
-		d.Set("service_broker_name", service.ServiceBrokerName)
-	}
-
-	// Get service plans
-	servicePlans, _, err := session.ClientV3.GetServicePlans(ccv3.Query{
-		// Constant not defined by cli ccv3
-		Key:    "service_offering_guids",
-		Values: []string{service.GUID},
-	})
-	if err != nil {
-		return diag.FromErr(err)
-	}
-
-	servicePlansTf := make(map[string]interface{})
-	for _, sp := range servicePlans {
-		servicePlansTf[strings.Replace(sp.Name, ".", "_", -1)] = sp.GUID
-	}
-	d.Set("service_plans", servicePlansTf)
-
-	return nil
 }

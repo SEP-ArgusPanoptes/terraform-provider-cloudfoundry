@@ -1,188 +1,243 @@
 package cloudfoundry
 
 import (
-	"code.cloudfoundry.org/cli/api/cloudcontroller/ccv3"
+	"context"
 	"fmt"
-	"github.com/terraform-providers/terraform-provider-cloudfoundry/cloudfoundry/managers"
-	"testing"
 
-	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/resource"
-	"github.com/hashicorp/terraform-plugin-sdk/v2/terraform"
+	"github.com/hashicorp/go-uuid"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/diag"
+	"github.com/terraform-providers/terraform-provider-cloudfoundry/cloudfoundry/managers"
+
+	resources "code.cloudfoundry.org/cli/resources"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
 )
 
-const segmentResource = `
-resource "cloudfoundry_org" "iso-org1" {
-	name = "iso-organization-one"
-}
-resource "cloudfoundry_org" "iso-org2" {
-	name = "iso-organization-two"
-}
-resource "cloudfoundry_isolation_segment" "segment1" {
-	name = "segment-one"
-}
-resource "cloudfoundry_isolation_segment_entitlement" "segment1_orgs" {
-	segment = "${cloudfoundry_isolation_segment.segment1.id}"
-	orgs = [
-    "${cloudfoundry_org.iso-org1.id}",
-    "${cloudfoundry_org.iso-org2.id}"
-  ]
-}
-`
+func resourceSegment() *schema.Resource {
+	return &schema.Resource{
+		CreateContext: resourceSegmentCreate,
+		ReadContext:   resourceSegmentRead,
+		UpdateContext: resourceSegmentUpdate,
+		DeleteContext: resourceSegmentDelete,
+		Importer: &schema.ResourceImporter{
+			StateContext: ImportReadContext(resourceSegmentRead),
+		},
 
-const segmentResourceUpdateName = `
-resource "cloudfoundry_org" "iso-org1" {
-	name = "iso-organization-one"
-}
-resource "cloudfoundry_org" "iso-org2" {
-	name = "iso-organization-two"
-}
-resource "cloudfoundry_isolation_segment" "segment1" {
-	name = "segment-one-name"
-}
-resource "cloudfoundry_isolation_segment_entitlement" "segment1_orgs" {
-	segment = "${cloudfoundry_isolation_segment.segment1.id}"
-	orgs = [
-    "${cloudfoundry_org.iso-org1.id}",
-    "${cloudfoundry_org.iso-org2.id}"
-  ]
-}
-`
-
-const segmentResourceUpdateOrgs = `
-resource "cloudfoundry_org" "iso-org1" {
-	name = "iso-organization-one"
-}
-resource "cloudfoundry_isolation_segment" "segment1" {
-	name = "segment-one-name"
-}
-resource "cloudfoundry_isolation_segment_entitlement" "segment1_orgs" {
-	segment = "${cloudfoundry_isolation_segment.segment1.id}"
-	orgs = [
-    	"${cloudfoundry_org.iso-org1.id}"
-  	]
-	default = true
-}
-`
-
-var defaultLenIsolationSegments int
-
-func TestAccResSegment_normal(t *testing.T) {
-	segRef := "cloudfoundry_isolation_segment.segment1"
-	entitleRef := "cloudfoundry_isolation_segment_entitlement.segment1_orgs"
-
-	segments, _, err := testSession().ClientV3.GetIsolationSegments()
-	if err != nil {
-		panic(err)
-	}
-	defaultLenIsolationSegments = len(segments)
-	resource.ParallelTest(t,
-		resource.TestCase{
-			PreCheck:          func() { testAccPreCheck(t) },
-			ProviderFactories: testAccProvidersFactories,
-			CheckDestroy:      testAccCheckSegmentDestroyed("segment-one-name"),
-			Steps: []resource.TestStep{
-				resource.TestStep{
-					Config: segmentResource,
-					Check: resource.ComposeTestCheckFunc(
-						testAccCheckSegmentExists(segRef, entitleRef),
-						resource.TestCheckResourceAttr(segRef, "name", "segment-one"),
-						resource.TestCheckResourceAttr(entitleRef, "orgs.#", "2"),
-					),
-				},
-				resource.TestStep{
-					Config: segmentResourceUpdateName,
-					Check: resource.ComposeTestCheckFunc(
-						testAccCheckSegmentExists(segRef, entitleRef),
-						resource.TestCheckResourceAttr(segRef, "name", "segment-one-name"),
-						resource.TestCheckResourceAttr(entitleRef, "orgs.#", "2"),
-					),
-				},
-				resource.TestStep{
-					Config: segmentResourceUpdateOrgs,
-					Check: resource.ComposeTestCheckFunc(
-						testAccCheckSegmentExists(segRef, entitleRef),
-						resource.TestCheckResourceAttr(segRef, "name", "segment-one-name"),
-						resource.TestCheckResourceAttr(entitleRef, "orgs.#", "1"),
-					),
-				},
+		Schema: map[string]*schema.Schema{
+			"name": &schema.Schema{
+				Type:     schema.TypeString,
+				Required: true,
+				ForceNew: true,
 			},
-		})
-}
-
-func testAccCheckSegmentExists(segName string, entitleName string) resource.TestCheckFunc {
-	return func(s *terraform.State) (err error) {
-		session := testAccProvider.Meta().(*managers.Session)
-		sm := session.ClientV3
-
-		seg, ok := s.RootModule().Resources[segName]
-		if !ok {
-			return fmt.Errorf("segment '%s' not found in terraform state", segName)
-		}
-		entitle, ok := s.RootModule().Resources[entitleName]
-		if !ok {
-			return fmt.Errorf("segment '%s' not found in terraform state", entitleName)
-		}
-
-		segID := seg.Primary.ID
-		segAttributes := seg.Primary.Attributes
-		segment, _, err := sm.GetIsolationSegment(segID)
-		if err != nil {
-			return fmt.Errorf("segment '%s' not found", segName)
-		}
-
-		if err = assertEquals(segAttributes, "name", segment.Name); err != nil {
-			return err
-		}
-
-		entitleID := entitle.Primary.ID
-		entitleAttributes := entitle.Primary.Attributes
-		if entitleAttributes["segment"] != segID {
-			return fmt.Errorf("entitlement resource id '%s does not match segment id '%s'", entitleID, segID)
-		}
-
-		if err = assertEquals(entitleAttributes, "segment", segID); err != nil {
-			return err
-		}
-		orgs, _, err := sm.GetIsolationSegmentOrganizations(entitleAttributes["segment"])
-		if err != nil {
-			return fmt.Errorf("could fetch orgs from segment '%s'", segID)
-		}
-		tfOrgs := make([]interface{}, len(orgs))
-		for i, org := range orgs {
-			tfOrgs[i] = org.GUID
-		}
-		if err = assertSetEquals(entitleAttributes, "orgs", tfOrgs); err != nil {
-			return err
-		}
-		for _, org := range orgs {
-			rl, _, err := sm.GetOrganizationDefaultIsolationSegment(org.GUID)
-			if err != nil {
-				return err
-			}
-			if entitleAttributes["default"] == "1" && rl.GUID != segID {
-				return fmt.Errorf("entitlement resource default isolation segment for org %s mismatch, this should be using current segment", org.Name)
-			}
-			if entitleAttributes["default"] == "0" && rl.GUID == segID {
-				return fmt.Errorf("entitlement resource default isolation segment for org %s mismatch, this should be not using current segment", org.Name)
-			}
-		}
-		return
+			labelsKey:      labelsSchema(),
+			annotationsKey: annotationsSchema(),
+		},
 	}
 }
 
-func testAccCheckSegmentDestroyed(segName string) resource.TestCheckFunc {
-	return func(s *terraform.State) error {
-		session := testAccProvider.Meta().(*managers.Session)
-		orgs, _, err := session.ClientV3.GetIsolationSegments(ccv3.Query{
-			Key:    ccv3.NameFilter,
-			Values: []string{segName},
-		})
-		if err != nil {
-			return err
+func resourceSegmentEntitlement() *schema.Resource {
+	return &schema.Resource{
+		CreateContext: resourceSegmentEntitlementCreate,
+		ReadContext:   resourceSegmentEntitlementRead,
+		UpdateContext: resourceSegmentEntitlementUpdate,
+		DeleteContext: resourceSegmentEntitlementDelete,
+		// Importer: &schema.ResourceImporter{
+		// 	State: ImportStatePassthrough,
+		// },
+
+		Schema: map[string]*schema.Schema{
+			"segment": &schema.Schema{
+				Type:     schema.TypeString,
+				Required: true,
+				ForceNew: true,
+			},
+			"orgs": &schema.Schema{
+				Type:     schema.TypeSet,
+				Elem:     &schema.Schema{Type: schema.TypeString},
+				Set:      resourceStringHash,
+				MinItems: 1,
+				Required: true,
+			},
+			"default": &schema.Schema{
+				Type:        schema.TypeBool,
+				Optional:    true,
+				Default:     "false",
+				Description: "Set this isolation segment defined as default segment for those organizations. Default to false.",
+			},
+		},
+	}
+}
+
+func resourceSegmentCreate(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
+	session := meta.(*managers.Session)
+	name := d.Get("name").(string)
+
+	sm := session.ClientV3
+	seg, _, err := sm.CreateIsolationSegment(resources.IsolationSegment{
+		Name: name,
+	})
+	if err != nil {
+		return diag.FromErr(err)
+	}
+	d.SetId(seg.GUID)
+	err = metadataCreate(segmentMetadata, d, meta)
+	if err != nil {
+		return diag.FromErr(err)
+	}
+	return nil
+}
+
+func resourceSegmentUpdate(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
+	return diag.FromErr(metadataUpdate(segmentMetadata, d, meta))
+}
+
+func resourceSegmentRead(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
+	session := meta.(*managers.Session)
+
+	sm := session.ClientV3
+	seg, _, err := sm.GetIsolationSegment(d.Id())
+	if err != nil {
+		if IsErrNotFound(err) {
+			d.SetId("")
+			return nil
 		}
-		if len(orgs) > 0 {
-			return fmt.Errorf("segment with name '%s' still exists in cloud foundry", segName)
+		return diag.FromErr(err)
+	}
+	d.Set("name", seg.Name)
+
+	err = metadataRead(segmentMetadata, d, meta, false)
+	if err != nil {
+		return diag.FromErr(err)
+	}
+	return nil
+}
+
+func resourceSegmentDelete(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
+	session := meta.(*managers.Session)
+	sm := session.ClientV3
+	_, err := sm.DeleteIsolationSegment(d.Id())
+	return diag.FromErr(err)
+}
+
+func resourceSegmentEntitlementCreate(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
+	session := meta.(*managers.Session)
+	segmentId := d.Get("segment").(string)
+	tfOrgs := d.Get("orgs").(*schema.Set).List()
+	id, err := uuid.GenerateUUID()
+	if err != nil {
+		return diag.FromErr(err)
+	}
+	d.SetId(id)
+
+	orgs := make([]string, len(tfOrgs))
+	for i := 0; i < len(tfOrgs); i++ {
+		orgs[i] = fmt.Sprint(tfOrgs[i])
+	}
+
+	sm := session.ClientV3
+	_, _, err = sm.EntitleIsolationSegmentToOrganizations(segmentId, orgs)
+	if err != nil {
+		d.SetId("")
+		return diag.FromErr(err)
+	}
+	if d.Get("default").(bool) {
+		for _, org := range orgs {
+			_, _, err := sm.UpdateOrganizationDefaultIsolationSegmentRelationship(org, segmentId)
+			if err != nil {
+				d.SetId("")
+				return diag.FromErr(err)
+			}
 		}
+	}
+	return nil
+}
+
+func resourceSegmentEntitlementUpdate(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
+	session := meta.(*managers.Session)
+	sm := session.ClientV3
+	if !d.HasChange("orgs") {
 		return nil
 	}
+	segmentId := d.Get("segment").(string)
+	oldTfOrgs, newTfOrgs := d.GetChange("orgs")
+	toDelete, toAdd := getListChanges(oldTfOrgs, newTfOrgs)
+
+	for _, orgId := range toDelete {
+		_, err := sm.DeleteIsolationSegmentOrganization(segmentId, orgId)
+		if err != nil {
+			return diag.FromErr(err)
+		}
+	}
+	if len(toAdd) > 0 {
+		_, _, err := sm.EntitleIsolationSegmentToOrganizations(segmentId, toAdd)
+		if err != nil {
+			return diag.FromErr(err)
+		}
+	}
+	if !d.HasChange("default") {
+		return nil
+	}
+	tfOrgs := newTfOrgs.(*schema.Set).List()
+	_, defaultChange := d.GetChange("default")
+	if !defaultChange.(bool) {
+		segmentId = ""
+	}
+	for _, tfOrg := range tfOrgs {
+		_, _, err := sm.UpdateOrganizationDefaultIsolationSegmentRelationship(tfOrg.(string), segmentId)
+		if err != nil {
+			d.SetId("")
+			return diag.FromErr(err)
+		}
+	}
+	return nil
+}
+
+func resourceSegmentEntitlementRead(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
+	session := meta.(*managers.Session)
+
+	sm := session.ClientV3
+	orgs, _, err := sm.GetIsolationSegmentOrganizations(d.Get("segment").(string))
+	if err != nil {
+		if IsErrNotFound(err) {
+			d.SetId("")
+			return nil
+		}
+		return diag.FromErr(err)
+	}
+
+	tfOrgs := d.Get("orgs").(*schema.Set).List()
+	finalTfOrgs := make([]interface{}, 0)
+	for _, org := range orgs {
+		inside := false
+		for _, tfOrg := range tfOrgs {
+			if tfOrg.(string) == org.GUID {
+				inside = true
+				break
+			}
+		}
+		if inside {
+			finalTfOrgs = append(finalTfOrgs, org.GUID)
+		}
+	}
+	d.Set("orgs", schema.NewSet(resourceStringHash, finalTfOrgs))
+	return nil
+}
+
+func resourceSegmentEntitlementDelete(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
+	session := meta.(*managers.Session)
+	sm := session.ClientV3
+	tfOrgs := d.Get("orgs").(*schema.Set).List()
+	for _, org := range tfOrgs {
+		if d.Get("default").(bool) {
+			_, _, err := sm.UpdateOrganizationDefaultIsolationSegmentRelationship(org.(string), "")
+			if err != nil {
+				return diag.FromErr(err)
+			}
+		}
+		_, err := sm.DeleteIsolationSegmentOrganization(d.Get("segment").(string), fmt.Sprint(org))
+		if err != nil {
+			return diag.FromErr(err)
+		}
+	}
+
+	return nil
 }

@@ -1,213 +1,238 @@
 package cloudfoundry
 
 import (
-	"context"
+	"fmt"
+	"testing"
 
-	"code.cloudfoundry.org/cli/api/cloudcontroller/ccv2"
-	"code.cloudfoundry.org/cli/api/cloudcontroller/ccv3"
-	"github.com/hashicorp/go-uuid"
-	"github.com/hashicorp/terraform-plugin-sdk/v2/diag"
-	"github.com/terraform-providers/terraform-provider-cloudfoundry/cloudfoundry/managers"
-
+	"code.cloudfoundry.org/cfnetworking-cli-api/cfnetworking/cfnetv1"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/resource"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/terraform"
+	"github.com/terraform-providers/terraform-provider-cloudfoundry/cloudfoundry/managers"
 )
 
-func resourceOrg() *schema.Resource {
-	return &schema.Resource{
+const netPolicyResource = `
+data "cloudfoundry_domain" "internal" {
+    name = "apps.internal"
+}
+data "cloudfoundry_domain" "local" {
+    name = "%s"
+}
+resource "cloudfoundry_route" "net-policy-res-front" {
+  domain = "${data.cloudfoundry_domain.local.id}"
+  space = "%s"
+  hostname = "net-policy-res-front"
+}
+resource "cloudfoundry_route" "net-policy-res-back" {
+  domain = "${data.cloudfoundry_domain.internal.id}"
+  space = "%s"
+  hostname = "net-policy-res-back"
+}
+resource "cloudfoundry_app" "net-policy-res-front" {
+  name = "net-policy-res-front"
+  buildpack = "binary_buildpack"
+  space = "%s"
+  memory = "64"
+  disk_quota = "512"
+  timeout = 1800
+  path = "%s"
+  environment = {
+    "FORWARD" = "http://net-policy-res-back.apps.internal:8080/"
+  }
+  routes {
+    route = "${cloudfoundry_route.net-policy-res-front.id}"
+  }
+}
+resource "cloudfoundry_app" "net-policy-res-back" {
+  name = "net-policy-res-back"
+  buildpack = "binary_buildpack"
+  space = "%s"
+  memory = "64"
+  disk_quota = "512"
+  timeout = 1800
+  path = "%s"
 
-		CreateContext: resourceOrgCreate,
-		ReadContext:   resourceOrgRead,
-		UpdateContext: resourceOrgUpdate,
-		DeleteContext: resourceOrgDelete,
+  routes {
+    route = "${cloudfoundry_route.net-policy-res-back.id}"
+  }
+}
+resource "cloudfoundry_network_policy" "policy-res" {
+  policy {
+    source_app = "${cloudfoundry_app.net-policy-res-front.id}"
+    destination_app = "${cloudfoundry_app.net-policy-res-back.id}"
+    port = "8080"
+  }
+  policy {
+    source_app = "${cloudfoundry_app.net-policy-res-front.id}"
+    destination_app = "${cloudfoundry_app.net-policy-res-back.id}"
+    port = "8081"
+  }
+}
+`
 
-		Importer: &schema.ResourceImporter{
-			StateContext: ImportReadContext(resourceOrgRead),
-		},
+const netPolicyResourceUpdate = `
+data "cloudfoundry_domain" "internal" {
+    name = "apps.internal"
+}
+data "cloudfoundry_domain" "local" {
+    name = "%s"
+}
+resource "cloudfoundry_route" "net-policy-res-front" {
+  domain = "${data.cloudfoundry_domain.local.id}"
+  space = "%s"
+  hostname = "net-policy-res-front"
+}
+resource "cloudfoundry_route" "net-policy-res-back" {
+  domain = "${data.cloudfoundry_domain.internal.id}"
+  space = "%s"
+  hostname = "net-policy-res-back"
+}
+resource "cloudfoundry_app" "net-policy-res-front" {
+  name = "net-policy-res-front"
+  buildpack = "binary_buildpack"
+  space = "%s"
+  memory = "64"
+  disk_quota = "512"
+  timeout = 1800
+  path = "%s"
+  environment = {
+    "FORWARD" = "http://net-policy-res-back.apps.internal:8080/"
+  }
+  routes {
+    route = "${cloudfoundry_route.net-policy-res-front.id}"
+  }
+}
+resource "cloudfoundry_app" "net-policy-res-back" {
+  name = "net-policy-res-back"
+  buildpack = "binary_buildpack"
+  space = "%s"
+  memory = "64"
+  disk_quota = "512"
+  timeout = 1800
+  path = "%s"
 
-		Schema: map[string]*schema.Schema{
+  routes {
+    route = "${cloudfoundry_route.net-policy-res-back.id}"
+  }
+}
+resource "cloudfoundry_network_policy" "policy-res" {
+  policy {
+    source_app = "${cloudfoundry_app.net-policy-res-front.id}"
+    destination_app = "${cloudfoundry_app.net-policy-res-back.id}"
+    port = "8081"
+  }
+}
+`
 
-			"name": &schema.Schema{
-				Type:     schema.TypeString,
-				Required: true,
+func TestAccResNetworkPolicy_normal(t *testing.T) {
+
+	spaceId, _ := defaultTestSpace(t)
+	ref := "cloudfoundry_network_policy.policy-res"
+
+	resource.ParallelTest(t,
+		resource.TestCase{
+			PreCheck:          func() { testAccPreCheck(t) },
+			ProviderFactories: testAccProvidersFactories,
+			Steps: []resource.TestStep{
+
+				resource.TestStep{
+					Config: fmt.Sprintf(netPolicyResource,
+						defaultAppDomain(),
+						spaceId,
+						spaceId,
+						spaceId, asset("dummy-app-rp.zip"),
+						spaceId, asset("dummy-app.zip"),
+					),
+					Check: resource.ComposeTestCheckFunc(
+						testAccCheckNetworkPoliciesExists(ref, func() (err error) {
+
+							if err = assertHTTPResponse("https://net-policy-res-front."+defaultAppDomain(), 200, nil); err != nil {
+								return err
+							}
+							return
+						}),
+					),
+				},
+
+				resource.TestStep{
+					Config: fmt.Sprintf(netPolicyResourceUpdate,
+						defaultAppDomain(),
+						spaceId,
+						spaceId,
+						spaceId, asset("dummy-app-rp.zip"),
+						spaceId, asset("dummy-app.zip"),
+					),
+					Check: resource.ComposeTestCheckFunc(
+						testAccCheckNetworkPoliciesExists(ref, func() (err error) {
+
+							if err = assertHTTPResponse("https://net-policy-res-front."+defaultAppDomain(), 500, nil); err != nil {
+								return err
+							}
+							return
+						}),
+					),
+				},
 			},
-			"quota": &schema.Schema{
-				Type:     schema.TypeString,
-				Optional: true,
-				Computed: true,
-			},
-			"managers": &schema.Schema{
-				Deprecated: "Use resource cloudfoundry_org_users instead",
-				Type:       schema.TypeSet,
-				ConfigMode: schema.SchemaConfigModeAttr,
-				Computed:   true,
-				Optional:   true,
-				Elem:       &schema.Schema{Type: schema.TypeString},
-				Set:        resourceStringHash,
-			},
-			"billing_managers": &schema.Schema{
-				Deprecated: "Use resource cloudfoundry_org_users instead",
-				Type:       schema.TypeSet,
-				ConfigMode: schema.SchemaConfigModeAttr,
-				Computed:   true,
-				Optional:   true,
-				Elem:       &schema.Schema{Type: schema.TypeString},
-				Set:        resourceStringHash,
-			},
-			"auditors": &schema.Schema{
-				Deprecated: "Use resource cloudfoundry_org_users instead",
-				Type:       schema.TypeSet,
-				ConfigMode: schema.SchemaConfigModeAttr,
-				Computed:   true,
-				Optional:   true,
-				Elem:       &schema.Schema{Type: schema.TypeString},
-				Set:        resourceStringHash,
-			},
-			labelsKey:      labelsSchema(),
-			annotationsKey: annotationsSchema(),
-			"delete_recursive_allowed": {
-				Type:        schema.TypeBool,
-				Optional:    true,
-				Default:     true,
-				Description: "Allow recursive deletion of spaces.",
-			},
-		},
-	}
+		})
 }
 
-func resourceOrgCreate(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
-	session := meta.(*managers.Session)
-	om := session.ClientV2
+func testAccCheckNetworkPoliciesExists(ref string, validate func() error) resource.TestCheckFunc {
 
-	name := d.Get("name").(string)
-	quota := d.Get("quota").(string)
+	return func(s *terraform.State) error {
 
-	org, _, err := om.CreateOrganization(name, quota)
-	if err != nil {
-		return diag.FromErr(err)
-	}
-	if quota == "" {
-		d.Set("quota", org.QuotaDefinitionGUID)
-	}
-	d.SetId(org.GUID)
-	return resourceOrgUpdate(ctx, d, meta)
-}
+		session := testAccProvider.Meta().(*managers.Session)
 
-func resourceOrgRead(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
-	session := meta.(*managers.Session)
-	om := session.ClientV2
-
-	id := d.Id()
-
-	org, _, err := om.GetOrganization(id)
-	if err != nil {
-		if IsErrNotFound(err) {
-			d.SetId("")
-			return nil
+		rs, ok := s.RootModule().Resources[ref]
+		if !ok {
+			return fmt.Errorf("network policy '%s' not found in terraform state", ref)
 		}
-		return diag.FromErr(err)
-	}
+		attributes := rs.Primary.Attributes
 
-	d.Set("name", org.Name)
-	d.Set("quota", org.QuotaDefinitionGUID)
+		reader := &schema.MapFieldReader{
+			Schema: resourceNetworkPolicy().Schema,
+			Map:    schema.BasicMapReader(attributes),
+		}
 
-	for t, r := range orgRoleMap {
-		users, _, err := om.GetOrganizationUsersByRole(r, id)
+		result, err := reader.ReadField([]string{"policy"})
 		if err != nil {
-			return diag.FromErr(err)
+			return err
 		}
-		tfUsers := d.Get(t).(*schema.Set).List()
-		if !IsImportState(d) {
-			finalUsers := intersectSlices(tfUsers, users, func(source, item interface{}) bool {
-				return source.(string) == item.(ccv2.User).GUID
+		policiesTf := GetListOfStructs(result.Value)
+		idsMap := make(map[string]bool)
+		for _, p := range policiesTf {
+			idsMap[p["source_app"].(string)] = true
+			idsMap[p["destination_app"].(string)] = true
+		}
+		ids := make([]string, 0)
+		for k := range idsMap {
+			ids = append(ids, k)
+		}
+		policies, err := session.NetClient.ListPolicies(ids...)
+		if err != nil {
+			return err
+		}
+
+		for _, policyTf := range policiesTf {
+			inSlice := isInSlice(policies, func(object interface{}) bool {
+				policy := object.(cfnetv1.Policy)
+				start, end, err := portRangeParse(policyTf["port"].(string))
+				if err != nil {
+					// this is already validated in validate func
+					// so if we have something wrong we are deeply unlucky
+					panic(err)
+				}
+				if start != policy.Destination.Ports.Start || end != policy.Destination.Ports.End {
+					return false
+				}
+				return policyTf["source_app"].(string) == policy.Source.ID &&
+					policyTf["destination_app"].(string) == policy.Destination.ID &&
+					policyTf["protocol"].(string) == string(policy.Destination.Protocol)
 			})
-			d.Set(t, schema.NewSet(resourceStringHash, finalUsers))
-		} else {
-			d.Set(t, schema.NewSet(resourceStringHash, objectsToIds(users, func(object interface{}) string {
-				return object.(ccv2.User).GUID
-			})))
-		}
-
-	}
-	err = metadataRead(orgMetadata, d, meta, false)
-	if err != nil {
-		return diag.FromErr(err)
-	}
-	return nil
-}
-
-func resourceOrgUpdate(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
-	session := meta.(*managers.Session)
-
-	id := d.Id()
-	om := session.ClientV2
-
-	if !d.IsNewResource() {
-		_, _, err := om.UpdateOrganization(id, d.Get("name").(string), d.Get("quota").(string))
-		if err != nil {
-			return diag.FromErr(err)
-		}
-	}
-
-	for t, r := range orgRoleMap {
-		remove, add := getListChanges(d.GetChange(t))
-
-		for _, uid := range remove {
-			_, err := om.DeleteOrganizationUserByRole(r, id, uid)
-			if err != nil {
-				return diag.FromErr(err)
+			if !inSlice {
+				return fmt.Errorf("Missing network policy %#v", policyTf)
 			}
 		}
-		for _, uidOrUsername := range add {
-			byUsername := true
-			_, err := uuid.ParseUUID(uidOrUsername)
-			if err == nil {
-				byUsername = false
-			}
-			err = updateOrgUserByRole(session, r, id, uidOrUsername, byUsername)
-			if err != nil {
-				return diag.FromErr(err)
-			}
-		}
-	}
-	err := metadataUpdate(orgMetadata, d, meta)
-	if err != nil {
-		return diag.FromErr(err)
-	}
-	return nil
-}
 
-func resourceOrgDelete(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
-	session := meta.(*managers.Session)
-	client := session.ClientV3
-
-	id := d.Id()
-	spaces, _, _, err := session.ClientV3.GetSpaces(ccv3.Query{
-		Key:    ccv3.OrganizationGUIDFilter,
-		Values: []string{d.Id()},
-	})
-	if err != nil {
-		return diag.FromErr(err)
+		return validate()
 	}
-	if !session.Config.DeleteRecursiveAllowed && len(spaces) > 0 {
-		return diag.Errorf("Organization %s has %d spaces. Please delete them first or set delete_recursive_allowed to true", id, len(spaces))
-	}
-	for _, s := range spaces {
-		j, _, err := client.DeleteSpace(s.GUID)
-		if err != nil {
-			return diag.FromErr(err)
-		}
-		_, err = client.PollJob(j)
-		if err != nil {
-			return diag.FromErr(err)
-		}
-	}
-	j, _, err := client.DeleteOrganization(id)
-	if err != nil {
-		return diag.FromErr(err)
-	}
-	_, err = client.PollJob(j)
-	if err != nil {
-		return diag.FromErr(err)
-	}
-	return nil
 }

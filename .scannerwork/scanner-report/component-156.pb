@@ -1,1 +1,1 @@
-œ 2goXæhr cloudfoundry/resource_cf_user.go
+œ 2goXähr,cloudfoundry/resource_cf_space_users_test.go

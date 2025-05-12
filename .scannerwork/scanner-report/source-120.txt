@@ -2,231 +2,258 @@ package cloudfoundry
 
 import (
 	"code.cloudfoundry.org/cli/api/cloudcontroller/ccv2"
-	"context"
 	"fmt"
-	"github.com/hashicorp/terraform-plugin-sdk/v2/diag"
 	"github.com/terraform-providers/terraform-provider-cloudfoundry/cloudfoundry/managers"
+	"reflect"
+	"testing"
 
-	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/resource"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/terraform"
 )
 
-// FlagStatusEnabled - Status returned by CF api for enabled flags
-const FlagStatusEnabled = "enabled"
+const evgRunningResource = `
 
-// FlagStatusDisabled - Status returned by CF api for disabled flags
-const FlagStatusDisabled = "disabled"
+resource "cloudfoundry_evg" "running" {
 
-func resourceConfig() *schema.Resource {
+	name = "running"
 
-	return &schema.Resource{
+    variables = {
+        name1 = "value1"
+        name2 = "value2"
+        name3 = "value3"
+        name4 = "value4"
+    }
+}
+`
 
-		CreateContext: resourceConfigCreate,
-		ReadContext:   resourceConfigRead,
-		UpdateContext: resourceConfigUpdate,
-		DeleteContext: resourceConfigDelete,
+const evgRunningResourceUpdated = `
 
-		Importer: &schema.ResourceImporter{
-			StateContext: func(ctx context.Context, d *schema.ResourceData, meta interface{}) ([]*schema.ResourceData, error) {
-				d.SetId("config")
-				return ImportReadContext(resourceConfigRead)(ctx, d, meta)
-			},
-		},
+resource "cloudfoundry_evg" "running" {
 
-		Schema: map[string]*schema.Schema{
-			"feature_flags": &schema.Schema{
-				Type:     schema.TypeList,
-				Optional: true,
-				MaxItems: 1,
-				Elem: &schema.Resource{
-					Schema: map[string]*schema.Schema{
-						"user_org_creation": &schema.Schema{
-							Type:         schema.TypeString,
-							ValidateFunc: validateFeatureFlagValue,
-							Optional:     true,
-							Computed:     true,
-						},
-						"private_domain_creation": &schema.Schema{
-							Type:         schema.TypeString,
-							ValidateFunc: validateFeatureFlagValue,
-							Optional:     true,
-							Computed:     true,
-						},
-						"app_bits_upload": &schema.Schema{
-							Type:         schema.TypeString,
-							ValidateFunc: validateFeatureFlagValue,
-							Optional:     true,
-							Computed:     true,
-						},
-						"app_scaling": &schema.Schema{
-							Type:         schema.TypeString,
-							ValidateFunc: validateFeatureFlagValue,
-							Optional:     true,
-							Computed:     true,
-						},
-						"route_creation": &schema.Schema{
-							Type:         schema.TypeString,
-							ValidateFunc: validateFeatureFlagValue,
-							Optional:     true,
-							Computed:     true,
-						},
-						"service_instance_creation": &schema.Schema{
-							Type:         schema.TypeString,
-							ValidateFunc: validateFeatureFlagValue,
-							Optional:     true,
-							Computed:     true,
-						},
-						"diego_docker": &schema.Schema{
-							Type:         schema.TypeString,
-							ValidateFunc: validateFeatureFlagValue,
-							Optional:     true,
-							Computed:     true,
-						},
-						"set_roles_by_username": &schema.Schema{
-							Type:         schema.TypeString,
-							ValidateFunc: validateFeatureFlagValue,
-							Optional:     true,
-							Computed:     true,
-						},
-						"unset_roles_by_username": &schema.Schema{
-							Type:         schema.TypeString,
-							ValidateFunc: validateFeatureFlagValue,
-							Optional:     true,
-							Computed:     true,
-						},
-						"task_creation": &schema.Schema{
-							Type:         schema.TypeString,
-							ValidateFunc: validateFeatureFlagValue,
-							Optional:     true,
-							Computed:     true,
-						},
-						"env_var_visibility": &schema.Schema{
-							Type:         schema.TypeString,
-							ValidateFunc: validateFeatureFlagValue,
-							Optional:     true,
-							Computed:     true,
-						},
-						"space_scoped_private_broker_creation": &schema.Schema{
-							Type:         schema.TypeString,
-							ValidateFunc: validateFeatureFlagValue,
-							Optional:     true,
-							Computed:     true,
-						},
-						"space_developer_env_var_visibility": &schema.Schema{
-							Type:         schema.TypeString,
-							ValidateFunc: validateFeatureFlagValue,
-							Optional:     true,
-							Computed:     true,
-						},
-						"service_instance_sharing": &schema.Schema{
-							Type:         schema.TypeString,
-							ValidateFunc: validateFeatureFlagValue,
-							Optional:     true,
-							Computed:     true,
-						},
-						"hide_marketplace_from_unauthenticated_users": &schema.Schema{
-							Type:         schema.TypeString,
-							ValidateFunc: validateFeatureFlagValue,
-							Optional:     true,
-							Computed:     true,
-						},
-						"resource_matching": &schema.Schema{
-							Type:         schema.TypeString,
-							ValidateFunc: validateFeatureFlagValue,
-							Optional:     true,
-							Computed:     true,
-						},
-					},
+	name = "running"
+
+    variables = {
+        name1 = "value1"
+        name2 = "value2"
+        name3 = "valueC"
+        name4 = "valueD"
+        name5 = "valueE"
+    }
+}
+`
+
+const evgStagingResource = `
+resource "cloudfoundry_evg" "staging" {
+
+	name = "staging"
+
+    variables = {
+        name3 = "value3"
+        name4 = "value4"
+        name5 = "value5"
+    }
+}
+`
+
+const evgStagingResourceUpdated = `
+resource "cloudfoundry_evg" "staging" {
+
+	name = "staging"
+
+    variables = {
+        name4 = "value4"
+        name5 = "valueE"
+    }
+}
+`
+
+var defaultLenStagingEvg int
+var defaultLenRunningEvg int
+var evgCurrentRunning ccv2.EnvVarGroup = nil
+var evgCurrentStaging ccv2.EnvVarGroup = nil
+
+func addEvgToMap(m map[string]string, evg ccv2.EnvVarGroup) map[string]string {
+	for k, v := range evg {
+		m[k] = v
+	}
+	return m
+}
+
+func loadPreviousEvg() {
+	var err error
+	if evgCurrentRunning == nil {
+		evgCurrentRunning, _, err = testSession().ClientV2.GetEnvVarGroupRunning()
+		if err != nil {
+			panic(err)
+		}
+	}
+	if evgCurrentStaging == nil {
+		defaultLenRunningEvg = len(evgCurrentRunning)
+		evgCurrentStaging, _, err = testSession().ClientV2.GetEnvVarGroupStaging()
+		if err != nil {
+			panic(err)
+		}
+		defaultLenStagingEvg = len(evgCurrentStaging)
+	}
+}
+
+func TestAccRunningEvg_normal(t *testing.T) {
+	loadPreviousEvg()
+
+	ref := "cloudfoundry_evg.running"
+	name := "running"
+
+	resource.ParallelTest(t,
+		resource.TestCase{
+			PreCheck:          func() { testAccPreCheck(t) },
+			ProviderFactories: testAccProvidersFactories,
+			CheckDestroy:      testAccCheckEvgDestroy(name),
+			Steps: []resource.TestStep{
+
+				resource.TestStep{
+					Config: evgRunningResource,
+					Check: resource.ComposeTestCheckFunc(
+						checkEvgExists(ref, addEvgToMap(map[string]string{
+							"name1": "value1",
+							"name2": "value2",
+							"name3": "value3",
+							"name4": "value4",
+						}, evgCurrentRunning)),
+						resource.TestCheckResourceAttr(ref, "name", "running"),
+						resource.TestCheckResourceAttr(ref, "variables.name1", "value1"),
+						resource.TestCheckResourceAttr(ref, "variables.name2", "value2"),
+						resource.TestCheckResourceAttr(ref, "variables.name3", "value3"),
+						resource.TestCheckResourceAttr(ref, "variables.name4", "value4"),
+					),
+				},
+				resource.TestStep{
+					ResourceName:      ref,
+					ImportState:       true,
+					ImportStateVerify: false,
+				},
+				resource.TestStep{
+					Config: evgRunningResourceUpdated,
+					Check: resource.ComposeTestCheckFunc(
+						checkEvgExists(ref, addEvgToMap(map[string]string{
+							"name1": "value1",
+							"name2": "value2",
+							"name3": "valueC",
+							"name4": "valueD",
+							"name5": "valueE",
+						}, evgCurrentRunning)),
+						resource.TestCheckResourceAttr(ref, "name", "running"),
+						resource.TestCheckResourceAttr(ref, "variables.name1", "value1"),
+						resource.TestCheckResourceAttr(ref, "variables.name2", "value2"),
+						resource.TestCheckResourceAttr(ref, "variables.name3", "valueC"),
+						resource.TestCheckResourceAttr(ref, "variables.name4", "valueD"),
+						resource.TestCheckResourceAttr(ref, "variables.name5", "valueE"),
+					),
 				},
 			},
-		},
-	}
+		})
 }
 
-func validateFeatureFlagValue(v interface{}, k string) (ws []string, errs []error) {
-	value := v.(string)
-	if value != FlagStatusEnabled && value != FlagStatusDisabled {
-		errs = append(errs, fmt.Errorf("%q must be one of 'enabled' or 'disabled'", k))
-	}
-	return ws, errs
+func TestAccResStagingEvg_normal(t *testing.T) {
+	loadPreviousEvg()
+
+	ref := "cloudfoundry_evg.staging"
+	name := "staging"
+
+	resource.ParallelTest(t,
+		resource.TestCase{
+			PreCheck:          func() { testAccPreCheck(t) },
+			ProviderFactories: testAccProvidersFactories,
+			CheckDestroy:      testAccCheckEvgDestroy(name),
+			Steps: []resource.TestStep{
+
+				resource.TestStep{
+					Config: evgStagingResource,
+					Check: resource.ComposeTestCheckFunc(
+						checkEvgExists(ref, addEvgToMap(map[string]string{
+							"name3": "value3",
+							"name4": "value4",
+							"name5": "value5",
+						}, evgCurrentStaging)),
+						resource.TestCheckResourceAttr(ref, "name", "staging"),
+						resource.TestCheckResourceAttr(ref, "variables.%", "3"),
+						resource.TestCheckResourceAttr(ref, "variables.name3", "value3"),
+						resource.TestCheckResourceAttr(ref, "variables.name4", "value4"),
+						resource.TestCheckResourceAttr(ref, "variables.name5", "value5"),
+					),
+				},
+				resource.TestStep{
+					Config: evgStagingResourceUpdated,
+					Check: resource.ComposeTestCheckFunc(
+						checkEvgExists(ref, addEvgToMap(map[string]string{
+							"name4": "value4",
+							"name5": "valueE",
+						}, evgCurrentStaging)),
+						resource.TestCheckResourceAttr(ref, "name", "staging"),
+						resource.TestCheckResourceAttr(ref, "variables.%", "2"),
+						resource.TestCheckResourceAttr(ref, "variables.name4", "value4"),
+						resource.TestCheckResourceAttr(ref, "variables.name5", "valueE"),
+					),
+				},
+			},
+		})
 }
 
-func resourceConfigCreate(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
+func checkEvgExists(resource string, wantedEvg map[string]string) resource.TestCheckFunc {
 
-	session := meta.(*managers.Session)
-	if session == nil {
-		return diag.Errorf("client is nil")
-	}
+	return func(s *terraform.State) error {
 
-	if v, ok := d.GetOk("feature_flags"); ok {
-		ffs := getFeatureFlags(v)
-		for _, ff := range ffs {
-			_, err := session.ClientV2.SetConfigFeatureFlags(ff)
-			if err != nil {
-				return diag.FromErr(err)
-			}
+		session := testAccProvider.Meta().(*managers.Session)
+
+		rs, ok := s.RootModule().Resources[resource]
+		if !ok {
+			return fmt.Errorf("asg '%s' not found in terraform state", resource)
 		}
 
-	}
+		id := rs.Primary.ID
 
-	d.SetId("config")
-	return resourceConfigRead(ctx, d, meta)
-}
-
-func resourceConfigRead(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
-
-	session := meta.(*managers.Session)
-	if session == nil {
-		return diag.Errorf("client is nil")
-	}
-	featureFlags, _, err := session.ClientV2.GetConfigFeatureFlags()
-	if err != nil {
-		return diag.FromErr(err)
-	}
-
-	flags := make(map[string]interface{})
-	for _, ff := range featureFlags {
-		if ff.Enabled {
-			flags[ff.Name] = FlagStatusEnabled
-		} else {
-			flags[ff.Name] = FlagStatusDisabled
+		var variables map[string]string
+		var err error
+		switch id {
+		case AppStatusRunning:
+			variables, _, err = session.ClientV2.GetEnvVarGroupRunning()
+		case AppStatusStaging:
+			variables, _, err = session.ClientV2.GetEnvVarGroupStaging()
 		}
-	}
-
-	d.Set("feature_flags", []interface{}{flags})
-	return diag.FromErr(err)
-}
-
-func resourceConfigUpdate(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
-	session := meta.(*managers.Session)
-
-	if d.HasChange("feature_flags") {
-		ffs := getFeatureFlags(d.Get("feature_flags"))
-		for _, ff := range ffs {
-			_, err := session.ClientV2.SetConfigFeatureFlags(ff)
-			if err != nil {
-				return diag.FromErr(err)
-			}
+		if err != nil {
+			return err
 		}
-	}
-	return nil
-}
-
-func resourceConfigDelete(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
-	return nil
-}
-
-func getFeatureFlags(v interface{}) []ccv2.FeatureFlag {
-	flags := v.([]interface{})[0].(map[string]interface{})
-	featureFlags := make([]ccv2.FeatureFlag, 0)
-	for k, v := range flags {
-
-		vv := v.(string)
-		if len(vv) > 0 {
-			featureFlags = append(featureFlags, ccv2.FeatureFlag{
-				Name:    k,
-				Enabled: vv == FlagStatusEnabled,
-			})
+		if !reflect.DeepEqual(wantedEvg, variables) {
+			return fmt.Errorf("map with key 'variables' expected to be:\n%# v\nbut was:%# v", wantedEvg, variables)
 		}
+		variablesInterface := make(map[string]interface{})
+		for k, v := range variables {
+			variablesInterface[k] = v
+		}
+		return nil
 	}
-	return featureFlags
+}
+
+func testAccCheckEvgDestroy(name string) resource.TestCheckFunc {
+
+	return func(s *terraform.State) error {
+		session := testAccProvider.Meta().(*managers.Session)
+		var variables map[string]string
+		var defaultLen int
+		var err error
+		switch name {
+		case AppStatusRunning:
+			variables, _, err = session.ClientV2.GetEnvVarGroupRunning()
+			defaultLen = defaultLenRunningEvg
+		case AppStatusStaging:
+			variables, _, err = session.ClientV2.GetEnvVarGroupStaging()
+			defaultLen = defaultLenStagingEvg
+		}
+		if err != nil {
+			return err
+		}
+		if len(variables) != defaultLen {
+			return fmt.Errorf("%s variables are not empty", name)
+		}
+		return nil
+	}
 }

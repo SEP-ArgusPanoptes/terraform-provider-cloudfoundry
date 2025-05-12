@@ -1,114 +1,217 @@
 package cloudfoundry
 
 import (
-	"code.cloudfoundry.org/cli/api/cloudcontroller/ccv2"
+	"code.cloudfoundry.org/cli/api/cloudcontroller/ccerror"
+	"context"
 	"fmt"
-	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/resource"
-	"github.com/hashicorp/terraform-plugin-sdk/v2/terraform"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/diag"
+
+	"code.cloudfoundry.org/cli/api/cloudcontroller/ccv2"
+	"github.com/hashicorp/go-uuid"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
 	"github.com/terraform-providers/terraform-provider-cloudfoundry/cloudfoundry/managers"
-	"strings"
-	"testing"
 )
 
-const testSetupTfResourceForSpaceAsgs = `
-resource "cloudfoundry_asg" "asg1" {
-	name = "asg-required-at-runtime"
-    rule {
-        protocol = "all"
-        destination = "192.168.100.0/24"
-    }
-}
-resource "cloudfoundry_asg" "asg2" {
-	name = "asg-required-at-staging"
-    rule {
-        protocol = "all"
-        destination = "192.168.101.0/24"
-    }
-}
-resource "cloudfoundry_org" "org1" {
-	name = "organization-one"
-}
-resource "cloudfoundry_space" "space1" {
-    name = "space-two"
-	org = cloudfoundry_org.org1.id
-	quota = ""
-}
-resource "cloudfoundry_space_asgs" "spaceasgs1" {
-    space = cloudfoundry_space.space1.id
-    running_asgs = [ cloudfoundry_asg.asg1.id ]
-    staging_asgs = [ cloudfoundry_asg.asg2.id ]
-}
-`
+func resourceSpaceAsgs() *schema.Resource {
 
-func TestAccResSpaceAsgs(t *testing.T) {
+	return &schema.Resource{
 
-	resource.Test(t,
-		resource.TestCase{
-			PreCheck:          func() { testAccPreCheck(t) },
-			ProviderFactories: testAccProvidersFactories,
-			CheckDestroy:      testAccCheckSpaceAsgsDestroyed(),
-			Steps: []resource.TestStep{
+		CreateContext: resourceSpaceAsgsCreate,
+		ReadContext:   resourceSpaceAsgsRead,
+		UpdateContext: resourceSpaceAsgsUpdate,
+		DeleteContext: resourceSpaceAsgsDelete,
 
-				resource.TestStep{
-					Config: testSetupTfResourceForSpaceAsgs,
-					Check: resource.ComposeTestCheckFunc(
-						testAccCheckSpaceAsgsExists("cloudfoundry_space.space1"),
-					),
-				},
+		Importer: &schema.ResourceImporter{
+			StateContext: ImportReadContext(resourceSpaceUsersRead),
+		},
+
+		Schema: map[string]*schema.Schema{
+			"space": {
+				Type:     schema.TypeString,
+				ForceNew: true,
+				Required: true,
 			},
-		})
+			"running_asgs": {
+				Type:       schema.TypeSet,
+				ConfigMode: schema.SchemaConfigModeAttr,
+				Computed:   true,
+				Optional:   true,
+				Elem:       &schema.Schema{Type: schema.TypeString},
+				Set:        resourceStringHash,
+			},
+			"staging_asgs": {
+				Type:       schema.TypeSet,
+				ConfigMode: schema.SchemaConfigModeAttr,
+				Computed:   true,
+				Optional:   true,
+				Elem:       &schema.Schema{Type: schema.TypeString},
+				Set:        resourceStringHash,
+			},
+		},
+	}
 }
 
-func testAccCheckSpaceAsgsExists(resourceTfName string) resource.TestCheckFunc {
+func resourceSpaceAsgsCreate(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
+	id, err := uuid.GenerateUUID()
+	if err != nil {
+		return diag.FromErr(err)
+	}
+	d.SetId(id)
 
-	return func(s *terraform.State) error {
-		session := testAccProvider.Meta().(*managers.Session)
+	return resourceSpaceAsgsUpdate(ctx, d, meta)
+}
 
-		rs, ok := s.RootModule().Resources[resourceTfName]
-		if !ok {
-			return fmt.Errorf("Resource '%s' not found in terraform state", resourceTfName)
-		}
-		id := rs.Primary.ID
+func resourceSpaceAsgsRead(c context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
+	session := meta.(*managers.Session)
+	spaceId := d.Get("space").(string)
 
-		runningAsgs, _, err := session.ClientV2.GetSpaceSecurityGroups(id)
-		if err != nil {
-			return fmt.Errorf("Error while trying to load asgs for space %s: %s.", id, err.Error())
-		}
-
+	runningAsgs, _, err := session.ClientV2.GetSpaceSecurityGroups(spaceId)
+	if err != nil {
+		return nil
+	}
+	if !IsImportState(d) {
+		finalRunningAsg := intersectSlices(d.Get("running_asgs").(*schema.Set).List(), runningAsgs, func(source, item interface{}) bool {
+			return source.(string) == item.(ccv2.SecurityGroup).GUID
+		})
+		d.Set("running_asgs", schema.NewSet(resourceStringHash, finalRunningAsg))
+	} else {
 		finalRunningAsgs, _ := getInSlice(runningAsgs, func(object interface{}) bool {
-			return !object.(ccv2.SecurityGroup).RunningDefault && object.(ccv2.SecurityGroup).Name == "asg-required-at-runtime"
+			return !object.(ccv2.SecurityGroup).RunningDefault
 		})
+		d.Set("running_asgs", schema.NewSet(resourceStringHash, objectsToIds(finalRunningAsgs, func(object interface{}) string {
+			return object.(ccv2.SecurityGroup).GUID
+		})))
+	}
 
-		if len(finalRunningAsgs) != 1 {
-			return fmt.Errorf("Expected one running asg named 'asg-required-at-runtime' but found '%s'.", getNamesOfSecorityGroups(finalRunningAsgs))
-		}
-
-		stagingAsgs, _, err := session.ClientV2.GetSpaceStagingSecurityGroups(id)
-
+	stagingAsgs, _, err := session.ClientV2.GetSpaceStagingSecurityGroups(spaceId)
+	if err != nil {
+		return nil
+	}
+	if !IsImportState(d) {
+		finalStagingAsg := intersectSlices(d.Get("staging_asgs").(*schema.Set).List(), stagingAsgs, func(source, item interface{}) bool {
+			return source.(string) == item.(ccv2.SecurityGroup).GUID
+		})
+		d.Set("staging_asgs", schema.NewSet(resourceStringHash, finalStagingAsg))
+	} else {
 		finalStagingAsgs, _ := getInSlice(stagingAsgs, func(object interface{}) bool {
-			return !object.(ccv2.SecurityGroup).StagingDefault && object.(ccv2.SecurityGroup).Name == "asg-required-at-staging"
+			return !object.(ccv2.SecurityGroup).StagingDefault
 		})
+		d.Set("staging_asgs", schema.NewSet(resourceStringHash, objectsToIds(finalStagingAsgs, func(object interface{}) string {
+			return object.(ccv2.SecurityGroup).GUID
+		})))
+	}
 
-		if len(finalStagingAsgs) != 1 {
-			return fmt.Errorf("Expected one staging asg named 'asg-required-at-staging' but found '%s'.", getNamesOfSecorityGroups(finalStagingAsgs))
+	return nil
+}
+
+func resourceSpaceAsgsUpdate(c context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
+	session := meta.(*managers.Session)
+	spaceID := d.Get("space").(string)
+	_, _, err := session.ClientV2.GetSpace(spaceID)
+	if err != nil {
+		return diag.FromErr(err)
+	}
+
+	removeRunningAsgs, addRunningAsgs := getListChanges(d.GetChange("running_asgs"))
+	for _, asgID := range removeRunningAsgs {
+		err := updateSpaceRemoveRunningAsgs(c, spaceID, asgID, session)
+		if err != nil {
+			return diag.FromErr(err)
 		}
-
-		return nil
 	}
+
+	for _, asgID := range addRunningAsgs {
+		err := updateSpaceAddRunningAsgs(c, spaceID, asgID, session)
+		if err != nil {
+			return diag.FromErr(err)
+		}
+	}
+
+	removeStagingAsgs, addStagingAsgs := getListChanges(d.GetChange("staging_asgs"))
+	for _, asgID := range removeStagingAsgs {
+		err := updateSpaceRemoveStagingAsgs(c, spaceID, asgID, session)
+		if err != nil {
+			return diag.FromErr(err)
+		}
+	}
+
+	for _, asgID := range addStagingAsgs {
+		err := updateSpaceAddStagingAsgs(c, spaceID, asgID, session)
+		if err != nil {
+			return diag.FromErr(err)
+		}
+	}
+
+	return nil
 }
 
-func getNamesOfSecorityGroups(objs []interface{}) string {
-	var names []string
-	for _, o := range objs {
-		names = append(names, o.(ccv2.SecurityGroup).Name)
+func resourceSpaceAsgsDelete(c context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
+	session := meta.(*managers.Session)
+	spaceID := d.Get("space").(string)
+	_, _, err := session.ClientV2.GetSpace(spaceID)
+	if err != nil {
+		return diag.FromErr(err)
 	}
-	return strings.Join(names, ",")
+
+	removeRunningAsgs := d.Get("running_asgs").(*schema.Set).List()
+	for _, asgID := range removeRunningAsgs {
+		err := updateSpaceRemoveRunningAsgs(c, spaceID, asgID.(string), session)
+		if err != nil {
+			return diag.FromErr(err)
+		}
+	}
+
+	removeStagingAsgs := d.Get("staging_asgs").(*schema.Set).List()
+	for _, asgID := range removeStagingAsgs {
+		err := updateSpaceRemoveStagingAsgs(c, spaceID, asgID.(string), session)
+		if err != nil {
+			return diag.FromErr(err)
+		}
+	}
+	return nil
 }
 
-func testAccCheckSpaceAsgsDestroyed() resource.TestCheckFunc {
+// helper functions
+// These should go to the ClientV2; would someone like to raise a change request?
+func updateSpaceAddRunningAsgs(c context.Context, spaceID string, asgID string, session *managers.Session) error {
+	return updateSpaceAsgs(c, "PUT", "/v2/spaces/%s/security_groups/%s", spaceID, asgID, session)
+}
 
-	return func(s *terraform.State) error {
-		// it does not make much sense to test this because the relation space - asg is not an object itself
-		return nil
+func updateSpaceRemoveRunningAsgs(c context.Context, spaceID string, asgID string, session *managers.Session) error {
+	return updateSpaceAsgs(c, "DELETE", "/v2/spaces/%s/security_groups/%s", spaceID, asgID, session)
+}
+
+func updateSpaceAddStagingAsgs(c context.Context, spaceID string, asgID string, session *managers.Session) error {
+	return updateSpaceAsgs(c, "PUT", "/v2/spaces/%s/staging_security_groups/%s", spaceID, asgID, session)
+}
+
+func updateSpaceRemoveStagingAsgs(c context.Context, spaceID string, asgID string, session *managers.Session) error {
+	return updateSpaceAsgs(c, "DELETE", "/v2/spaces/%s/staging_security_groups/%s", spaceID, asgID, session)
+}
+
+func updateSpaceAsgs(c context.Context, method string, path string, spaceID string, asgID string, session *managers.Session) error {
+	p := fmt.Sprintf(path, spaceID, asgID)
+
+	req, err := session.RawClient.NewRequest(method, p, nil)
+	if err != nil {
+		return err
 	}
+
+	resp, err := session.RawClient.Do(req)
+	if err != nil {
+		return err
+	}
+
+	if resp.StatusCode >= 400 {
+		err = ccerror.RawHTTPStatusError{
+			StatusCode: resp.StatusCode,
+		}
+		return err
+	}
+
+	defer func() {
+		err = resp.Body.Close()
+	}()
+
+	return err
 }

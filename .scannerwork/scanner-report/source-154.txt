@@ -1,266 +1,313 @@
 package cloudfoundry
 
 import (
-	"context"
-	"strings"
-
-	"github.com/hashicorp/terraform-plugin-sdk/v2/diag"
-
 	"code.cloudfoundry.org/cli/api/cloudcontroller/ccv2"
-	"code.cloudfoundry.org/cli/api/cloudcontroller/ccv2/constant"
-	"github.com/hashicorp/go-uuid"
-	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
+	"fmt"
 	"github.com/terraform-providers/terraform-provider-cloudfoundry/cloudfoundry/managers"
+	"strconv"
+	"testing"
+
+	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/resource"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/terraform"
 )
 
-var typeToSpaceRoleMap = map[string]constant.UserRole{
-	"managers":   constant.SpaceManager,
-	"developers": constant.SpaceDeveloper,
-	"auditors":   constant.SpaceAuditor,
+const spaceResource = `
+
+resource "cloudfoundry_asg" "svc" {
+	name = "app-services"
+    rule {
+        protocol = "all"
+        destination = "192.168.100.0/24"
+    }
+}
+resource "cloudfoundry_asg" "stg1" {
+	name = "app-services1"
+    rule {
+        protocol = "all"
+        destination = "192.168.101.0/24"
+    }
+}
+resource "cloudfoundry_asg" "stg2" {
+	name = "app-services2"
+    rule {
+        protocol = "all"
+        destination = "192.168.102.0/24"
+    }
+}
+resource "cloudfoundry_asg" "stg3" {
+	name = "app-services3"
+    rule {
+        protocol = "all"
+        destination = "192.168.103.0/24"
+    }
+}
+resource "cloudfoundry_user" "tl" {
+	name = "teamlead@acme.com"
+	password = "password"
+}
+resource "cloudfoundry_user" "dev1" {
+    name = "developer1@acme.com"
+	password = "password"
+}
+resource "cloudfoundry_user" "dev2" {
+    name = "developer2@acme.com"
+	password = "password"
+}
+resource "cloudfoundry_user" "dev3" {
+    name = "developer3@acme.com"
+	password = "password"
+}
+resource "cloudfoundry_user" "adr" {
+    name = "auditor@acme.com"
+	password = "password"
+}
+resource "cloudfoundry_org" "org1" {
+	name = "organization-one"
+}
+resource "cloudfoundry_space_quota" "dev" {
+	name = "50g"
+	org = "${cloudfoundry_org.org1.id}"
+    allow_paid_service_plans = true
+    instance_memory = 1024
+    total_memory = 51200
+    total_app_instances = 100
+    total_routes = 100
+    total_services = 150
 }
 
-func resourceSpaceUsers() *schema.Resource {
+resource "cloudfoundry_space" "space1" {
+	name = "space-one"
+	org = "${cloudfoundry_org.org1.id}"
+	quota = "${cloudfoundry_space_quota.dev.id}"
+	asgs = [ "${cloudfoundry_asg.svc.id}" ]
+	staging_asgs = [ "${cloudfoundry_asg.stg1.id}", "${cloudfoundry_asg.stg2.id}" ]
+    managers = [
+        "${cloudfoundry_user.tl.id}"
+    ]
+    developers = [
+        "${cloudfoundry_user.tl.id}",
+        "${cloudfoundry_user.dev1.id}",
+		"${cloudfoundry_user.dev2.id}"
+    ]
+    auditors = [
+        "${cloudfoundry_user.adr.id}",
+		"${cloudfoundry_user.dev3.id}"
+    ]
+	allow_ssh = true
+}
+`
 
-	return &schema.Resource{
+const spaceResourceUpdate = `
 
-		CreateContext: resourceSpaceUsersCreate,
-		ReadContext:   resourceSpaceUsersRead,
-		UpdateContext: resourceSpaceUsersUpdate,
-		DeleteContext: resourceSpaceUsersDelete,
-
-		Importer: &schema.ResourceImporter{
-			StateContext: ImportReadContext(resourceSpaceUsersRead),
-		},
-
-		Schema: map[string]*schema.Schema{
-			"space": {
-				Type:     schema.TypeString,
-				ForceNew: true,
-				Required: true,
-			},
-			"force": {
-				Type:     schema.TypeBool,
-				Optional: true,
-				Default:  false,
-			},
-			"managers": {
-				Type:       schema.TypeSet,
-				ConfigMode: schema.SchemaConfigModeAttr,
-				Computed:   true,
-				Optional:   true,
-				Elem:       &schema.Schema{Type: schema.TypeString},
-				Set:        resourceStringHash,
-			},
-			"developers": {
-				Type:       schema.TypeSet,
-				ConfigMode: schema.SchemaConfigModeAttr,
-				Computed:   true,
-				Optional:   true,
-				Elem:       &schema.Schema{Type: schema.TypeString},
-				Set:        resourceStringHash,
-			},
-			"auditors": {
-				Type:       schema.TypeSet,
-				ConfigMode: schema.SchemaConfigModeAttr,
-				Computed:   true,
-				Optional:   true,
-				Elem:       &schema.Schema{Type: schema.TypeString},
-				Set:        resourceStringHash,
-			},
-		},
-	}
+resource "cloudfoundry_asg" "svc" {
+	name = "app-services"
+    rule {
+        protocol = "all"
+        destination = "192.168.100.0/24"
+    }
+}
+resource "cloudfoundry_asg" "stg1" {
+	name = "app-services1"
+    rule {
+        protocol = "all"
+        destination = "192.168.101.0/24"
+    }
+}
+resource "cloudfoundry_asg" "stg2" {
+	name = "app-services2"
+    rule {
+        protocol = "all"
+        destination = "192.168.102.0/24"
+    }
+}
+resource "cloudfoundry_asg" "stg3" {
+	name = "app-services3"
+    rule {
+        protocol = "all"
+        destination = "192.168.103.0/24"
+    }
+}
+resource "cloudfoundry_user" "tl" {
+    name = "teamlead@acme.com"
+	password = "password"
+}
+resource "cloudfoundry_user" "dev1" {
+    name = "developer1@acme.com"
+	password = "password"
+}
+resource "cloudfoundry_user" "dev2" {
+    name = "developer2@acme.com"
+	password = "password"
+}
+resource "cloudfoundry_user" "dev3" {
+    name = "developer3@acme.com"
+	password = "password"
+}
+resource "cloudfoundry_user" "adr" {
+    name = "auditor@acme.com"
+	password = "password"
+}
+resource "cloudfoundry_org" "org1" {
+	name = "organization-one"
+}
+resource "cloudfoundry_space_quota" "dev" {
+	name = "50g"
+	org = "${cloudfoundry_org.org1.id}"
+    allow_paid_service_plans = true
+    instance_memory = 1024
+    total_memory = 51200
+    total_app_instances = 100
+    total_routes = 100
+    total_services = 150
 }
 
-func resourceSpaceUsersCreate(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
-	id, err := uuid.GenerateUUID()
-	if err != nil {
-		return diag.FromErr(err)
-	}
-	session := meta.(*managers.Session)
-	spaceId := d.Get("space").(string)
-	d.SetId(id)
-	if d.Get("force").(bool) {
-		for _, r := range typeToSpaceRoleMap {
-			users, _, err := session.ClientV2.GetSpaceUsersByRole(r, spaceId)
-			if err != nil {
-				return diag.FromErr(err)
-			}
-			for _, u := range users {
-				_, err := session.ClientV2.DeleteSpaceUserByRole(r, spaceId, u.GUID)
-				if err != nil {
-					return diag.FromErr(err)
-				}
-			}
+resource "cloudfoundry_space_quota" "dev2" {
+	name = "50g-dev2"
+	org = "${cloudfoundry_org.org1.id}"
+    allow_paid_service_plans = true
+    instance_memory = 1024
+    total_memory = 51200
+    total_app_instances = 100
+    total_routes = 100
+    total_services = 150
+}
 
+resource "cloudfoundry_space" "space1" {
+	name = "space-one-updated"
+	org = "${cloudfoundry_org.org1.id}"
+	quota = "${cloudfoundry_space_quota.dev2.id}"
+	asgs = [ "${cloudfoundry_asg.svc.id}" ]
+	staging_asgs = [ "${cloudfoundry_asg.stg2.id}", "${cloudfoundry_asg.stg3.id}" ]
+    managers = [
+        "${cloudfoundry_user.tl.id}"
+    ]
+    developers = [
+        "${cloudfoundry_user.tl.id}",
+        "${cloudfoundry_user.dev1.id}",
+    ]
+    auditors = [
+        "${cloudfoundry_user.adr.id}",
+		"${cloudfoundry_user.dev2.id}"
+    ]
+	allow_ssh = true
+}
+`
+
+func TestAccResSpace_normal(t *testing.T) {
+
+	ref := "cloudfoundry_space.space1"
+	refUserRemoved := "cloudfoundry_user.dev3"
+
+	resource.Test(t,
+		resource.TestCase{
+			PreCheck:          func() { testAccPreCheck(t) },
+			ProviderFactories: testAccProvidersFactories,
+			CheckDestroy:      testAccCheckSpaceDestroyed("space-one"),
+			Steps: []resource.TestStep{
+
+				resource.TestStep{
+					Config: spaceResource,
+					Check: resource.ComposeTestCheckFunc(
+						testAccCheckSpaceExists(ref, nil),
+						resource.TestCheckResourceAttr(
+							ref, "name", "space-one"),
+						resource.TestCheckResourceAttr(
+							ref, "asgs.#", "1"),
+						resource.TestCheckResourceAttr(
+							ref, "staging_asgs.#", "2"),
+						resource.TestCheckResourceAttr(
+							ref, "managers.#", "1"),
+						resource.TestCheckResourceAttr(
+							ref, "developers.#", "3"),
+						resource.TestCheckResourceAttr(
+							ref, "auditors.#", "2"),
+					),
+				},
+
+				resource.TestStep{
+					Config: spaceResourceUpdate,
+					Check: resource.ComposeTestCheckFunc(
+						testAccCheckSpaceExists(ref, &refUserRemoved),
+						resource.TestCheckResourceAttr(
+							ref, "name", "space-one-updated"),
+						resource.TestCheckResourceAttr(
+							ref, "asgs.#", "1"),
+						resource.TestCheckResourceAttr(
+							ref, "staging_asgs.#", "2"),
+						resource.TestCheckResourceAttr(
+							ref, "managers.#", "1"),
+						resource.TestCheckResourceAttr(
+							ref, "developers.#", "2"),
+						resource.TestCheckResourceAttr(
+							ref, "auditors.#", "2"),
+					),
+				},
+			},
+		})
+}
+
+func testAccCheckSpaceExists(resource string, refUserRemoved *string) resource.TestCheckFunc {
+
+	return func(s *terraform.State) error {
+		session := testAccProvider.Meta().(*managers.Session)
+
+		rs, ok := s.RootModule().Resources[resource]
+		if !ok {
+			return fmt.Errorf("quota '%s' not found in terraform state", resource)
 		}
-	}
-	return resourceSpaceUsersUpdate(ctx, d, meta)
-}
 
-func resourceSpaceUsersRead(_ context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
-	if IsImportState(d) {
-		_ = d.Set("space", d.Id())
-		_ = d.Set("force", false)
-	}
-	session := meta.(*managers.Session)
-	for t, r := range typeToSpaceRoleMap {
-		users, _, err := session.ClientV2.GetSpaceUsersByRole(r, d.Get("space").(string))
+		id := rs.Primary.ID
+		attributes := rs.Primary.Attributes
+
+		sm := session.ClientV2
+		space, _, err := sm.GetSpace(id)
 		if err != nil {
-			return diag.FromErr(err)
+			return err
 		}
-		tfUsers := d.Get(t).(*schema.Set).List()
-		if !d.Get("force").(bool) && !IsImportState(d) {
-			finalUsers := intersectSlices(tfUsers, users, func(source, item interface{}) bool {
-				return source.(string) == item.(ccv2.User).GUID || strings.EqualFold(source.(string), item.(ccv2.User).Username)
-			})
-			_ = d.Set(t, schema.NewSet(resourceStringHash, finalUsers))
-		} else {
-			usersByUsername := intersectSlices(tfUsers, users, func(source, item interface{}) bool {
-				return strings.EqualFold(source.(string), item.(ccv2.User).Username)
-			})
 
-			_ = d.Set(t, schema.NewSet(resourceStringHash, objectsToIds(users, func(object interface{}) string {
-				if isInSlice(usersByUsername, func(userByUsername interface{}) bool {
-					return strings.EqualFold(object.(ccv2.User).Username, userByUsername.(string))
-				}) {
-					return object.(ccv2.User).Username
-				}
+		if err = assertEquals(attributes, "name", space.Name); err != nil {
+			return err
+		}
+		if err = assertEquals(attributes, "org", space.OrganizationGUID); err != nil {
+			return err
+		}
+		if err = assertEquals(attributes, "quota", space.SpaceQuotaDefinitionGUID); err != nil {
+			return err
+		}
+		if err = assertEquals(attributes, "allow_ssh", strconv.FormatBool(space.AllowSSH)); err != nil {
+			return err
+		}
+
+		for t, r := range typeToSpaceRoleMap {
+			users, _, err := session.ClientV2.GetSpaceUsersByRole(r, id)
+			if err != nil {
+				return err
+			}
+			if err = assertSetEquals(attributes, t, objectsToIds(users, func(object interface{}) string {
 				return object.(ccv2.User).GUID
-			})))
+			})); err != nil {
+				return err
+			}
 		}
+
+		err = testUserRemovedFromOrg(refUserRemoved, space.GUID, session, s)
+
+		return nil
 	}
-	return nil
 }
 
-func resourceSpaceUsersUpdate(_ context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
-	session := meta.(*managers.Session)
-	spaceId := d.Get("space").(string)
-	space, _, err := session.ClientV2.GetSpace(spaceId)
-	if err != nil {
-		return diag.FromErr(err)
-	}
-	for t, r := range typeToSpaceRoleMap {
-		remove, add := getListChanges(d.GetChange(t))
-		for _, uid := range remove {
-			byUsername := true
-			_, err = uuid.ParseUUID(uid)
-			if err == nil {
-				byUsername = false
-			}
+func testAccCheckSpaceDestroyed(spacename string) resource.TestCheckFunc {
 
-			err = deleteSpaceUserByRole(session, r, spaceId, uid, byUsername)
-			if err != nil {
-				return diag.FromErr(err)
-			}
-		}
-		for _, uidOrUsername := range add {
-			byUsername := true
-			_, err := uuid.ParseUUID(uidOrUsername)
-			if err == nil {
-				byUsername = false
-			}
-			err = addOrNothingUserInOrgBySpace(session, space.OrganizationGUID, uidOrUsername, byUsername)
-			if err != nil {
-				return diag.FromErr(err)
-			}
+	return func(s *terraform.State) error {
 
-			err = updateSpaceUserByRole(session, r, spaceId, uidOrUsername, byUsername)
-			if err != nil {
-				return diag.FromErr(err)
-			}
-		}
-	}
-	return nil
-}
-
-func updateSpaceUserByRole(session *managers.Session, role constant.UserRole, guid string, guidOrUsername string, byUsername bool) error {
-	if !byUsername {
-		_, err := session.ClientV2.UpdateSpaceUserByRole(role, guid, guidOrUsername)
+		session := testAccProvider.Meta().(*managers.Session)
+		spaces, _, err := session.ClientV2.GetSpaces(ccv2.FilterByName(spacename))
 		if err != nil {
 			return err
 		}
-		return nil
-	}
-	var err error
-	switch role {
-	case constant.SpaceAuditor:
-		_, err = session.ClientV2.UpdateSpaceAuditorByUsername(guid, guidOrUsername)
-	case constant.SpaceManager:
-		_, err = session.ClientV2.UpdateSpaceManagerByUsername(guid, guidOrUsername)
-	default:
-		_, err = session.ClientV2.UpdateSpaceDeveloperByUsername(guid, guidOrUsername)
-	}
-	return err
-}
-
-func deleteSpaceUserByRole(session *managers.Session, role constant.UserRole, guid string, guidOrUsername string, byUsername bool) error {
-	if !byUsername {
-		_, err := session.ClientV2.DeleteSpaceUserByRole(role, guid, guidOrUsername)
-		if err != nil {
-			return err
+		if len(spaces) > 0 {
+			return fmt.Errorf("space with name '%s' still exists in cloud foundry", spacename)
 		}
 		return nil
 	}
-	var err error
-	switch role {
-	case constant.SpaceAuditor:
-		_, err = session.ClientV2.DeleteSpaceAuditorByUsername(guid, guidOrUsername)
-	case constant.SpaceManager:
-		_, err = session.ClientV2.DeleteSpaceManagerByUsername(guid, guidOrUsername)
-	default:
-		_, err = session.ClientV2.DeleteSpaceDeveloperByUsername(guid, guidOrUsername)
-	}
-	return err
-}
-
-func addOrNothingUserInOrgBySpace(session *managers.Session, orgId, uaaidOrUsername string, byUsername bool) error {
-	client := session.ClientV2
-	orgs, _, err := client.GetUserOrganizations(uaaidOrUsername)
-	isNotFound := IsErrNotFound(err)
-	isNotAuthorized := IsErrNotAuthorized(err)
-	if err != nil && !isNotFound && !isNotAuthorized {
-		return err
-	}
-
-	if !isNotAuthorized && isInSlice(orgs, func(object interface{}) bool {
-		return object.(ccv2.Organization).GUID == orgId
-	}) && !isNotFound {
-		return nil
-	}
-
-	// Fallback for isNotAuthorized case
-	if isNotAuthorized {
-		users, _, err := client.GetOrganizationUsers(orgId)
-		if err != nil {
-			return err
-		}
-		if isInSlice(users, func(object interface{}) bool {
-			return object.(ccv2.User).GUID == uaaidOrUsername
-		}) {
-			return nil
-		}
-	}
-	return updateOrgUserByRole(session, constant.OrgUser, orgId, uaaidOrUsername, byUsername)
-}
-
-func resourceSpaceUsersDelete(_ context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
-	spaceId := d.Get("space").(string)
-	session := meta.(*managers.Session)
-	for t, r := range typeToSpaceRoleMap {
-		tfUsers := d.Get(t).(*schema.Set).List()
-		for _, uid := range tfUsers {
-			uaaIDOrUsername := uid.(string)
-			byUsername := true
-			_, err := uuid.ParseUUID(uaaIDOrUsername)
-			if err == nil {
-				byUsername = false
-			}
-
-			err = deleteSpaceUserByRole(session, r, spaceId, uaaIDOrUsername, byUsername)
-			if err != nil {
-				return diag.FromErr(err)
-			}
-		}
-	}
-	return nil
 }

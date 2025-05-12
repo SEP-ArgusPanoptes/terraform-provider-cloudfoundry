@@ -1,76 +1,63 @@
 package cloudfoundry
 
 import (
-	"code.cloudfoundry.org/cli/api/cloudcontroller/ccv2"
-	"fmt"
-	"github.com/terraform-providers/terraform-provider-cloudfoundry/cloudfoundry/managers"
-	"testing"
+	"context"
 
-	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/resource"
-	"github.com/hashicorp/terraform-plugin-sdk/v2/terraform"
+	"code.cloudfoundry.org/cli/api/cloudcontroller/ccv3"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/diag"
+	"github.com/terraform-providers/terraform-provider-cloudfoundry/cloudfoundry/managers"
+
+	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
 )
 
-const stackDataResource = `
+func dataSourceStack() *schema.Resource {
 
-data "cloudfoundry_stack" "s" {
-    name = "%s"
-}
-`
+	return &schema.Resource{
 
-func TestAccDataSourceStack_normal(t *testing.T) {
-	defaultStacks, _, err := testSession().ClientV2.GetStacks()
-	if err != nil {
-		panic(err)
-	}
-	ref := "data.cloudfoundry_stack.s"
+		ReadContext: dataSourceStackRead,
 
-	resource.ParallelTest(t,
-		resource.TestCase{
-			PreCheck:          func() { testAccPreCheck(t) },
-			ProviderFactories: testAccProvidersFactories,
-			Steps: []resource.TestStep{
+		Schema: map[string]*schema.Schema{
 
-				resource.TestStep{
-					Config: fmt.Sprintf(stackDataResource, defaultStacks[0].Name),
-					Check: resource.ComposeTestCheckFunc(
-						checkDataSourceStackExists(ref),
-						resource.TestCheckResourceAttr(
-							ref, "name", defaultStacks[0].Name),
-					),
-				},
+			"name": &schema.Schema{
+				Type:     schema.TypeString,
+				Required: true,
 			},
-		})
+			"description": &schema.Schema{
+				Type:     schema.TypeString,
+				Computed: true,
+			},
+			labelsKey:      labelsSchema(),
+			annotationsKey: annotationsSchema(),
+		},
+	}
 }
 
-func checkDataSourceStackExists(resource string) resource.TestCheckFunc {
+func dataSourceStackRead(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
 
-	return func(s *terraform.State) error {
-
-		session := testAccProvider.Meta().(*managers.Session)
-
-		rs, ok := s.RootModule().Resources[resource]
-		if !ok {
-			return fmt.Errorf("stack '%s' not found in terraform state", resource)
-		}
-
-		id := rs.Primary.ID
-		name := rs.Primary.Attributes["name"]
-		description := rs.Primary.Attributes["description"]
-
-		stacks, _, err := session.ClientV2.GetStacks(ccv2.FilterByName(name))
-		if err != nil {
-			return err
-		}
-		if len(stacks) == 0 {
-			return NotFound
-		}
-		if err := assertSame(id, stacks[0].GUID); err != nil {
-			return err
-		}
-		if err := assertSame(description, stacks[0].Description); err != nil {
-			return err
-		}
-
-		return nil
+	session := meta.(*managers.Session)
+	if session == nil {
+		return diag.Errorf("client is nil")
 	}
+
+	sm := session.ClientV3
+
+	query := ccv3.Query{
+		Key:    ccv3.NameFilter,
+		Values: []string{d.Get("name").(string)},
+	}
+
+	stacks, _, err := sm.GetStacks(query)
+	if err != nil {
+		return diag.FromErr(err)
+	}
+	if len(stacks) == 0 {
+		return diag.FromErr(NotFound)
+	}
+	d.SetId(stacks[0].GUID)
+	d.Set("description", stacks[0].Description)
+	err = metadataRead(stackMetadata, d, meta, true)
+	if err != nil {
+		return diag.FromErr(err)
+	}
+	return diag.FromErr(err)
 }

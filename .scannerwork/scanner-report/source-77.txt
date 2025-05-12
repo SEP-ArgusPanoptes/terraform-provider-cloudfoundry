@@ -2,152 +2,167 @@ package managers
 
 import (
 	"bytes"
-	"code.cloudfoundry.org/cli/api/cloudcontroller"
-	"code.cloudfoundry.org/cli/api/cloudcontroller/ccerror"
-	"code.cloudfoundry.org/cli/api/router"
-	"io"
-	"io/ioutil"
+	"encoding/json"
+	"fmt"
+	"log"
 	"net/http"
-	"reflect"
+	"regexp"
+	"time"
 )
 
-// RetryRequest is a wrapper that retries failed requests if they contain a 5XX
-// status code.
-// copy of wrapper retry request in cli but remove the necessary
-// of have a readseeker body (annoying for sending in fullstream)
-type RetryRequest struct {
-	maxRetries int
-	connection cloudcontroller.Connection
+const tokenRegexp = "bearer [\\w\\.-]+"
+
+// RedactedValue is the text that is displayed for redacted content. (eg
+// authorization tokens, passwords, etc.)
+const RedactedValue = "[PRIVATE DATA HIDDEN]"
+
+func RedactHeaders(header http.Header) http.Header {
+	redactedHeaders := make(http.Header)
+	for key, value := range header {
+		if key == "Authorization" {
+			redactedHeaders[key] = []string{RedactedValue}
+		} else {
+			redactedHeaders[key] = value
+		}
+	}
+	return redactedHeaders
 }
 
-// NewRetryRequest returns a pointer to a RetryRequest wrapper.
-func NewRetryRequest(maxRetries int) *RetryRequest {
-	return &RetryRequest{
-		maxRetries: maxRetries,
+const tokenEndpoint = "token_endpoint"
+
+var keysToSanitize = regexp.MustCompile("(?i)token|password")
+var sanitizeURIParams = regexp.MustCompile(`([&?]password)=[A-Za-z\d\-._~!$'()*+,;=:@/?]*`)
+var sanitizeURLPassword = regexp.MustCompile(`([\d\w]+)://([^:]+):[^@]+@`)
+
+func SanitizeJSON(raw []byte) ([]byte, error) {
+	var result interface{}
+	decoder := json.NewDecoder(bytes.NewBuffer(raw))
+	decoder.UseNumber()
+	err := decoder.Decode(&result)
+	if err != nil {
+		return nil, err
+	}
+
+	sanitized := iterateAndRedact(result)
+
+	buff := new(bytes.Buffer)
+	encoder := json.NewEncoder(buff)
+	encoder.SetEscapeHTML(false)
+	encoder.SetIndent("", "  ")
+	err = encoder.Encode(sanitized)
+	if err != nil {
+		return nil, err
+	}
+
+	return buff.Bytes(), nil
+}
+
+func iterateAndRedact(blob interface{}) interface{} {
+	switch v := blob.(type) {
+	case string:
+		return sanitizeURL(v)
+	case []interface{}:
+		var list []interface{}
+		for _, val := range v {
+			list = append(list, iterateAndRedact(val))
+		}
+
+		return list
+	case map[string]interface{}:
+		for key, value := range v {
+			if keysToSanitize.MatchString(key) && key != tokenEndpoint {
+				v[key] = RedactedValue
+			} else {
+				v[key] = iterateAndRedact(value)
+			}
+		}
+		return v
+	}
+	return blob
+}
+
+func sanitizeURL(rawURL string) string {
+	sanitized := sanitizeURLPassword.ReplaceAllString(rawURL, fmt.Sprintf("$1://$2:%s@", RedactedValue))
+	sanitized = sanitizeURIParams.ReplaceAllString(sanitized, fmt.Sprintf("$1=%s", RedactedValue))
+	return sanitized
+}
+
+type RequestLogger struct {
+	dumpSanitizer *regexp.Regexp
+}
+
+func NewRequestLogger() *RequestLogger {
+	return &RequestLogger{
+		dumpSanitizer: regexp.MustCompile(tokenRegexp),
 	}
 }
 
-// Make retries the request if it comes back with a 5XX status code.
-func (retry *RetryRequest) Make(request *cloudcontroller.Request, passedResponse *cloudcontroller.Response) error {
-	var err error
-	for i := 0; i < retry.maxRetries+1; i++ {
-		err = retry.connection.Make(request, passedResponse)
-		if err == nil {
-			return nil
-		}
+func (display *RequestLogger) DisplayBody([]byte) error {
+	log.Printf("%s\n", RedactedValue)
+	return nil
+}
 
-		if skipRetry(request.Method, passedResponse.HTTPResponse) {
-			break
-		}
+func (display *RequestLogger) DisplayDump(dump string) error {
+	sanitized := display.dumpSanitizer.ReplaceAllString(dump, RedactedValue)
+	log.Printf("%s\n", sanitized)
+	return nil
+}
 
-		if request.Body == nil {
-			continue
-		}
+func (display *RequestLogger) DisplayHeader(name string, value string) error {
+	log.Printf("%s: %s\n", name, value)
+	return nil
+}
 
-		// detect if body is ioutil.NopCloser(&bytes.Buffer)
-		// if so we reset the content the buffer to be able to redo request with same body
-		if reflect.TypeOf(request.Body) == reflect.TypeOf(ioutil.NopCloser) {
-			reader := reflect.ValueOf(request.Body).FieldByName("Reader")
-			if buf, ok := reader.Interface().(*bytes.Buffer); ok {
-				data := buf.Bytes()
-				buf.Reset()
-				buf.Write(data)
-			}
-			continue
-		}
-		// detect if body is implementing interface ReadSeeker
-		// if so we go to the beginning of the content to be able to redo request with same body
-		if reader, ok := request.Body.(io.ReadSeeker); ok {
-			_, resetErr := reader.Seek(0, 0)
-			if resetErr != nil {
-				if _, ok := resetErr.(ccerror.PipeSeekError); ok {
-					return ccerror.PipeSeekError{Err: err}
-				}
-				return resetErr
-			}
-			continue
-		}
-		// if we reach this part, we are not able to know what is inside request body (and be able to resend the same content).
-		// This probably cause of full stream send which can be necessary by user.
-		// so we return directly the current error
-		return err
+func (display *RequestLogger) DisplayHost(name string) error {
+	log.Printf("host: %s\n", name)
+	return nil
+}
+
+func (display *RequestLogger) DisplayJSONBody(body []byte) error {
+	if len(body) == 0 {
+		return nil
 	}
-	return err
-}
 
-// Wrap sets the connection in the RetryRequest and returns itself.
-func (retry *RetryRequest) Wrap(innerconnection cloudcontroller.Connection) cloudcontroller.Connection {
-	retry.connection = innerconnection
-	return retry
-}
-
-func skipRetry(httpMethod string, response *http.Response) bool {
-	return httpMethod == http.MethodPost ||
-		response != nil &&
-			response.StatusCode != http.StatusInternalServerError &&
-			response.StatusCode != http.StatusBadGateway &&
-			response.StatusCode != http.StatusServiceUnavailable &&
-			response.StatusCode != http.StatusGatewayTimeout
-}
-
-type retryRequestRouter struct {
-	maxRetries int
-	connection router.Connection
-}
-
-func newRetryRequestRouter(maxRetries int) *retryRequestRouter {
-	return &retryRequestRouter{
-		maxRetries: maxRetries,
+	sanitized, err := SanitizeJSON(body)
+	if err != nil {
+		log.Printf("%s\n", string(body))
+		return nil
 	}
+
+	log.Printf("%s\n", string(sanitized))
+
+	return nil
 }
 
-func (retry *retryRequestRouter) Make(request *router.Request, passedResponse *router.Response) error {
-	var err error
-	for i := 0; i < retry.maxRetries+1; i++ {
-		err = retry.connection.Make(request, passedResponse)
-		if err == nil {
-			return nil
-		}
-
-		if skipRetry(request.Method, passedResponse.HTTPResponse) && passedResponse.HTTPResponse.StatusCode != http.StatusNotFound {
-			break
-		}
-		if request.Body == nil {
-			continue
-		}
-		// detect if body is ioutil.NopCloser(&bytes.Buffer)
-		// if so we reset the content the buffer to be able to redo request with same body
-		if reflect.TypeOf(request.Body) == reflect.TypeOf(ioutil.NopCloser) {
-			reader := reflect.ValueOf(request.Body).FieldByName("Reader")
-			if buf, ok := reader.Interface().(*bytes.Buffer); ok {
-				data := buf.Bytes()
-				buf.Reset()
-				buf.Write(data)
-			}
-			continue
-		}
-		// detect if body is implementing interface ReadSeeker
-		// if so we go to the beginning of the content to be able to redo request with same body
-		if reader, ok := request.Body.(io.ReadSeeker); ok {
-			_, resetErr := reader.Seek(0, 0)
-			if resetErr != nil {
-				if _, ok := resetErr.(ccerror.PipeSeekError); ok {
-					return ccerror.PipeSeekError{Err: err}
-				}
-				return resetErr
-			}
-			continue
-		}
-		// if we reach this part, we are not able to know what is inside request body (and be able to resend the same content).
-		// This probably cause of full stream send which can be necessary by user.
-		// so we return directly the current error
-		return err
-	}
-	return err
+func (display *RequestLogger) DisplayMessage(msg string) error {
+	log.Printf("%s\n", msg)
+	return nil
 }
 
-// Wrap sets the connection in the RetryRequest and returns itself.
-func (retry *retryRequestRouter) Wrap(innerconnection router.Connection) router.Connection {
-	retry.connection = innerconnection
-	return retry
+func (display *RequestLogger) DisplayRequestHeader(method string, uri string, httpProtocol string) error {
+	log.Printf("%s %s %s\n", method, uri, httpProtocol)
+	return nil
+}
+
+func (display *RequestLogger) DisplayResponseHeader(httpProtocol string, status string) error {
+	log.Printf("%s %s\n", httpProtocol, status)
+	return nil
+}
+
+func (display *RequestLogger) DisplayType(name string, requestDate time.Time) error {
+	text := fmt.Sprintf("%s: [%s]", name, requestDate.Format(time.RFC3339))
+	log.Println(text)
+	return nil
+}
+
+func (display *RequestLogger) HandleInternalError(err error) {
+	log.Println(err.Error())
+}
+
+func (display *RequestLogger) Start() error {
+	return nil
+}
+
+func (display *RequestLogger) Stop() error {
+	return nil
 }

@@ -1,75 +1,121 @@
 package cloudfoundry
 
 import (
-	"fmt"
+	"context"
 	"strings"
-	"testing"
 
-	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/resource"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/diag"
+	"github.com/terraform-providers/terraform-provider-cloudfoundry/cloudfoundry/managers"
+
+	"code.cloudfoundry.org/cli/resources"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
 )
 
-const domainDataResource = `
-data "cloudfoundry_domain" "my-domain" {
-    name = "%s"
-}
-`
+func dataSourceDomain() *schema.Resource {
 
-const privateDomainDataResource = `
-resource "cloudfoundry_org" "myorg" {
-	name = "myorg-ds-domain"
-}
+	return &schema.Resource{
 
-resource "cloudfoundry_domain" "mydomain" {
-  sub_domain = "private-ds-domain"
-  domain     = "%[1]s"
-  org = "${cloudfoundry_org.myorg.id}"
-}
+		ReadContext: dataSourceDomainRead,
 
-data "cloudfoundry_domain" "private" {
-  domain = "${cloudfoundry_domain.mydomain.domain}"
-  sub_domain = "private-ds-domain"
-}
-`
+		Schema: map[string]*schema.Schema{
 
-func TestAccDataSourceDomain_normal(t *testing.T) {
-
-	domain := strings.Join(strings.Split(defaultAppDomain(), ".")[1:], ".")
-	ref := "data.cloudfoundry_domain.my-domain"
-
-	resource.ParallelTest(t,
-		resource.TestCase{
-			PreCheck:          func() { testAccPreCheck(t) },
-			ProviderFactories: testAccProvidersFactories,
-			Steps: []resource.TestStep{
-
-				resource.TestStep{
-					Config: fmt.Sprintf(domainDataResource, domain),
-					Check: resource.ComposeTestCheckFunc(
-						resource.TestCheckResourceAttr(
-							ref, "name", domain),
-						resource.TestCheckResourceAttr(
-							ref, "domain", strings.SplitN(domain, ".", 2)[1]),
-					),
-				},
+			"name": &schema.Schema{
+				Type:     schema.TypeString,
+				Optional: true,
+				Computed: true,
 			},
-		})
+			"sub_domain": &schema.Schema{
+				Type:          schema.TypeString,
+				Optional:      true,
+				ConflictsWith: []string{"name"},
+			},
+			"domain": &schema.Schema{
+				Type:          schema.TypeString,
+				Optional:      true,
+				Computed:      true,
+				ConflictsWith: []string{"name"},
+			},
+			"org": &schema.Schema{
+				Type:     schema.TypeString,
+				Computed: true,
+			},
+			"internal": &schema.Schema{
+				Type:     schema.TypeBool,
+				Computed: true,
+			},
+		},
+	}
 }
 
-func TestAccDataSourceDomain_private(t *testing.T) {
-	ref := "data.cloudfoundry_domain.private"
-	resource.ParallelTest(t,
-		resource.TestCase{
-			PreCheck:          func() { testAccPreCheck(t) },
-			ProviderFactories: testAccProvidersFactories,
-			Steps: []resource.TestStep{
-				resource.TestStep{
-					Config: fmt.Sprintf(privateDomainDataResource, defaultAppDomain()),
-					Check: resource.ComposeTestCheckFunc(
-						resource.TestCheckResourceAttr(ref, "name", "private-ds-domain."+defaultAppDomain()),
-						resource.TestCheckResourceAttr(ref, "sub_domain", "private-ds-domain"),
-						resource.TestCheckResourceAttr(ref, "domain", defaultAppDomain()),
-					),
-				},
-			},
-		})
+func dataSourceDomainRead(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
+
+	session := meta.(*managers.Session)
+	if session == nil {
+		return diag.Errorf("client is nil")
+	}
+
+	dm := session.ClientV3
+
+	var (
+		name, prefix string
+	)
+
+	/* 	sharedDomains, _, err := dm.GetSharedDomains()
+	   	if err != nil {
+	   		return diag.FromErr(err)
+	   	}
+	   	privateDomains, _, err := dm.GetPrivateDomains()
+	   	if err != nil {
+	   		return diag.FromErr(err)
+	   	} */
+
+	domains, _, err := dm.GetDomains()
+
+	if err != nil {
+		return diag.FromErr(err)
+	}
+
+	if v, ok := d.GetOk("sub_domain"); ok {
+		prefix = v.(string) + "."
+		if v, ok = d.GetOk("domain"); ok {
+			name = prefix + v.(string)
+		}
+	} else if v, ok := d.GetOk("name"); ok {
+		name = v.(string)
+	} else {
+		return diag.Errorf("neither a full name or sub-domain was provided to do an effective domain search")
+	}
+
+	var domain *resources.Domain
+	if len(name) == 0 {
+		for _, d := range domains {
+			if strings.HasPrefix(d.Name, prefix) {
+				domain = &d
+				break
+			}
+		}
+		if domain == nil {
+			return diag.Errorf("no domain found with sub-domain '%s'", prefix)
+		}
+	} else {
+		for _, d := range domains {
+			if name == d.Name {
+				domain = &d
+				break
+			}
+		}
+		if domain == nil {
+			return diag.Errorf("no domain found with name '%s'", name)
+		}
+	}
+
+	domainParts := strings.Split(domain.Name, ".")
+
+	d.Set("name", domain.Name)
+	d.Set("sub_domain", domainParts[0])
+	d.Set("domain", strings.Join(domainParts[1:], "."))
+	d.Set("org", domain.OrganizationGUID)
+	d.Set("internal", domain.Internal.Value)
+	d.SetId(domain.GUID)
+	return diag.FromErr(err)
 }

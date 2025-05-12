@@ -1,1 +1,1 @@
-p 2goXhr2cloudfoundry/resource_cf_buildpack_migrate_test.go
+p 2goXhr-cloudfoundry/resource_cf_buildpack_migrate.go

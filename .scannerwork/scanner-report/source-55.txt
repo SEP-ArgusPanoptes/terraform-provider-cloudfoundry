@@ -8,34 +8,31 @@ import (
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/resource"
 )
 
-func TestAccServiceBroker_importBasic(t *testing.T) {
+func TestAccRoute_importBasic(t *testing.T) {
 
-	serviceBrokerURL, serviceBrokerUser, serviceBrokerPassword, _ := getTestBrokerCredentials(t)
+	_, orgName := defaultTestOrg(t)
+	_, spaceName := defaultTestSpace(t)
 
-	// Ensure any test artifacts from a
-	// failed run are deleted if the exist
-	deleteServiceBroker("test")
-	deleteServiceBroker("test-renamed")
-
-	resourceName := "cloudfoundry_service_broker.test"
+	resourceName := "cloudfoundry_route.test-app-route"
 
 	resource.Test(t,
 		resource.TestCase{
 			PreCheck:          func() { testAccPreCheck(t) },
 			ProviderFactories: testAccProvidersFactories,
-			CheckDestroy:      testAccCheckServiceBrokerDestroyed("test"),
+			CheckDestroy:      testAccCheckRouteDestroyed([]string{"test-app-single", "test-app-multi"}, defaultAppDomain()),
 			Steps: []resource.TestStep{
 
 				resource.TestStep{
-					Config: fmt.Sprintf(sbResource,
-						serviceBrokerURL, serviceBrokerUser, serviceBrokerPassword),
+					Config: fmt.Sprintf(routeResource,
+						defaultAppDomain(),
+						orgName, spaceName,
+						appPath),
 				},
 
 				resource.TestStep{
-					ResourceName:            resourceName,
-					ImportState:             true,
-					ImportStateVerify:       true,
-					ImportStateVerifyIgnore: []string{"password", "catalog_change", "catalog_hash", "fail_when_catalog_not_accessible"},
+					ResourceName:      resourceName,
+					ImportState:       true,
+					ImportStateVerify: true,
 				},
 			},
 		})

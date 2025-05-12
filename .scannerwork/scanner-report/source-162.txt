@@ -1,214 +1,180 @@
 package cloudfoundry
 
 import (
-	"encoding/json"
 	"fmt"
-	"reflect"
-	"strconv"
+	"time"
+
+	"code.cloudfoundry.org/cli/api/cloudcontroller/ccerror"
+	"code.cloudfoundry.org/cli/api/cloudcontroller/ccv2"
+	"code.cloudfoundry.org/cli/api/cloudcontroller/ccv3"
+	constantV3 "code.cloudfoundry.org/cli/api/cloudcontroller/ccv3/constant"
+	"code.cloudfoundry.org/cli/api/uaa"
+	"code.cloudfoundry.org/cli/resources"
+	"code.cloudfoundry.org/cli/types"
+	"github.com/terraform-providers/terraform-provider-cloudfoundry/cloudfoundry/common"
+	"github.com/terraform-providers/terraform-provider-cloudfoundry/cloudfoundry/managers"
 )
 
-func jsonNumToValue(in json.Number) interface{} {
-	var result interface{}
-	var err error
-	result, err = in.Int64()
-	if err == nil {
-		return result
+func IntToNullInt(v int) types.NullInt {
+	return types.NullInt{
+		IsSet: true,
+		Value: v,
 	}
-	result, err = in.Float64()
-	if err == nil {
-		return result
-	}
-	return in.String()
 }
 
-func mapInterfaceToMapString(in map[string]interface{}) map[string]string {
-	out := make(map[string]string)
-	for k, v := range in {
-		out[k] = fmt.Sprint(v)
+func IntToNullUint64Zero(v int) types.NullUint64 {
+	if v < 0 {
+		return types.NullUint64{
+			IsSet: false,
+		}
 	}
-	return out
+
+	return types.NullUint64{
+		IsSet: true,
+		Value: uint64(v),
+	}
 }
 
-// normalizeMap -
-func normalizeMap(in interface{}, outMap map[string]interface{}, key, delim string) map[string]interface{} {
-	if in == nil {
-		outMap[key] = nil
-		return outMap
+func BoolToNullBool(b bool) types.NullBool {
+	return types.NullBool{
+		IsSet: true,
+		Value: b,
 	}
-	rt := reflect.TypeOf(in)
-	if jsonNum, ok := in.(json.Number); ok {
-		in = jsonNumToValue(jsonNum)
-		rt = reflect.TypeOf(in)
-	}
+}
 
-	switch rt.Kind() {
-
-	case reflect.String:
-		outMap[key] = in.(string)
-	case reflect.Bool:
-		outMap[key] = strconv.FormatBool(in.(bool))
-
-	case reflect.Int:
-		outMap[key] = strconv.FormatInt(int64(in.(int)), 10)
-	case reflect.Int8:
-		outMap[key] = strconv.FormatInt(int64(in.(int8)), 10)
-	case reflect.Int16:
-		outMap[key] = strconv.FormatInt(int64(in.(int16)), 10)
-	case reflect.Int32:
-		outMap[key] = strconv.FormatInt(int64(in.(int32)), 10)
-	case reflect.Int64:
-		outMap[key] = strconv.FormatInt(in.(int64), 10)
-
-	case reflect.Uint:
-		outMap[key] = strconv.FormatUint(uint64(in.(uint)), 10)
-	case reflect.Uint8:
-		outMap[key] = strconv.FormatUint(uint64(in.(uint8)), 10)
-	case reflect.Uint16:
-		outMap[key] = strconv.FormatUint(uint64(in.(uint16)), 10)
-	case reflect.Uint32:
-		outMap[key] = strconv.FormatUint(uint64(in.(uint32)), 10)
-	case reflect.Uint64:
-		outMap[key] = strconv.FormatUint(in.(uint64), 10)
-
-	case reflect.Float32:
-		outMap[key] = strconv.FormatFloat(float64(in.(float32)), 'g', -1, 32)
-	case reflect.Float64:
-		outMap[key] = strconv.FormatFloat(in.(float64), 'g', -1, 64)
-
-	case reflect.Array, reflect.Slice:
-
-		switch rt.Elem().Kind() {
-		case reflect.String:
-			for i, v := range in.([]string) {
-				normalizeMap(v, outMap, fmt.Sprintf("%s%s%d", key, delim, i), delim)
-			}
-		case reflect.Bool:
-			for i, v := range in.([]bool) {
-				normalizeMap(v, outMap, fmt.Sprintf("%s%s%d", key, delim, i), delim)
-			}
-		case reflect.Int:
-			for i, v := range in.([]int) {
-				normalizeMap(v, outMap, fmt.Sprintf("%s%s%d", key, delim, i), delim)
-			}
-		case reflect.Int8:
-			for i, v := range in.([]int8) {
-				normalizeMap(v, outMap, fmt.Sprintf("%s%s%d", key, delim, i), delim)
-			}
-		case reflect.Int16:
-			for i, v := range in.([]string) {
-				normalizeMap(v, outMap, fmt.Sprintf("%s%s%d", key, delim, i), delim)
-			}
-		case reflect.Int32:
-			for i, v := range in.([]int32) {
-				normalizeMap(v, outMap, fmt.Sprintf("%s%s%d", key, delim, i), delim)
-			}
-		case reflect.Int64:
-			for i, v := range in.([]int64) {
-				normalizeMap(v, outMap, fmt.Sprintf("%s%s%d", key, delim, i), delim)
-			}
-		case reflect.Uint:
-			for i, v := range in.([]uint) {
-				normalizeMap(v, outMap, fmt.Sprintf("%s%s%d", key, delim, i), delim)
-			}
-		case reflect.Uint8:
-			for i, v := range in.([]uint8) {
-				normalizeMap(v, outMap, fmt.Sprintf("%s%s%d", key, delim, i), delim)
-			}
-		case reflect.Uint16:
-			for i, v := range in.([]uint16) {
-				normalizeMap(v, outMap, fmt.Sprintf("%s%s%d", key, delim, i), delim)
-			}
-		case reflect.Uint32:
-			for i, v := range in.([]uint32) {
-				normalizeMap(v, outMap, fmt.Sprintf("%s%s%d", key, delim, i), delim)
-			}
-		case reflect.Uint64:
-			for i, v := range in.([]uint64) {
-				normalizeMap(v, outMap, fmt.Sprintf("%s%s%d", key, delim, i), delim)
-			}
-		case reflect.Float32:
-			for i, v := range in.([]float32) {
-				normalizeMap(v, outMap, fmt.Sprintf("%s%s%d", key, delim, i), delim)
-			}
-		case reflect.Float64:
-			for i, v := range in.([]float64) {
-				normalizeMap(v, outMap, fmt.Sprintf("%s%s%d", key, delim, i), delim)
-			}
-		default:
-			for i, v := range in.([]interface{}) {
-				normalizeMap(v, outMap, fmt.Sprintf("%s%s%d", key, delim, i), delim)
-			}
-		}
-
-	case reflect.Map:
-
-		if len(key) != 0 {
-			key = key + delim
-		}
-
-		switch rt.Elem().Kind() {
-		case reflect.String:
-			for k, v := range in.(map[string]string) {
-				normalizeMap(v, outMap, key+k, delim)
-			}
-		case reflect.Bool:
-			for k, v := range in.(map[string]bool) {
-				normalizeMap(v, outMap, key+k, delim)
-			}
-		case reflect.Int:
-			for k, v := range in.(map[string]int) {
-				normalizeMap(v, outMap, key+k, delim)
-			}
-		case reflect.Int8:
-			for k, v := range in.(map[string]int8) {
-				normalizeMap(v, outMap, key+k, delim)
-			}
-		case reflect.Int16:
-			for k, v := range in.(map[string]string) {
-				normalizeMap(v, outMap, key+k, delim)
-			}
-		case reflect.Int32:
-			for k, v := range in.(map[string]int32) {
-				normalizeMap(v, outMap, key+k, delim)
-			}
-		case reflect.Int64:
-			for k, v := range in.(map[string]int64) {
-				normalizeMap(v, outMap, key+k, delim)
-			}
-		case reflect.Uint:
-			for k, v := range in.(map[string]uint) {
-				normalizeMap(v, outMap, key+k, delim)
-			}
-		case reflect.Uint8:
-			for k, v := range in.(map[string]uint8) {
-				normalizeMap(v, outMap, key+k, delim)
-			}
-		case reflect.Uint16:
-			for k, v := range in.(map[string]uint16) {
-				normalizeMap(v, outMap, key+k, delim)
-			}
-		case reflect.Uint32:
-			for k, v := range in.(map[string]uint32) {
-				normalizeMap(v, outMap, key+k, delim)
-			}
-		case reflect.Uint64:
-			for k, v := range in.(map[string]uint64) {
-				normalizeMap(v, outMap, key+k, delim)
-			}
-		case reflect.Float32:
-			for k, v := range in.(map[string]float32) {
-				normalizeMap(v, outMap, key+k, delim)
-			}
-		case reflect.Float64:
-			for k, v := range in.(map[string]float64) {
-				normalizeMap(v, outMap, key+k, delim)
-			}
-		default:
-			for k, v := range in.(map[string]interface{}) {
-				normalizeMap(v, outMap, key+k, delim)
-			}
+func IntToNullByteSize(v int) types.NullByteSizeInMb {
+	if v < 0 {
+		return types.NullByteSizeInMb{
+			IsSet: false,
 		}
 	}
+	return types.NullByteSizeInMb{
+		IsSet: true,
+		Value: uint64(v),
+	}
+}
 
-	return outMap
+func StringToFilteredString(val string) types.FilteredString {
+	if val == "" {
+		return types.FilteredString{
+			IsSet: false,
+		}
+	}
+	return types.FilteredString{
+		IsSet: true,
+		Value: val,
+	}
+}
+
+func IntToNullByteSizeZero(v int) types.NullByteSizeInMb {
+	if v <= 0 {
+		return types.NullByteSizeInMb{
+			IsSet: false,
+		}
+	}
+	return types.NullByteSizeInMb{
+		IsSet: true,
+		Value: uint64(v),
+	}
+}
+
+func NullByteSizeToInt(v types.NullByteSizeInMb) int {
+	if !v.IsSet {
+		return -1
+	}
+	return int(v.Value)
+}
+
+func UsersToIDs(users []ccv2.User) []interface{} {
+	ids := make([]interface{}, len(users))
+	for i, u := range users {
+		ids[i] = u.GUID
+	}
+	return ids
+}
+
+// MapToEnvironmentVariables :
+// Convert map[string]string to resources.EnvironmentVariables
+func MapToEnvironmentVariables(env map[string]string) resources.EnvironmentVariables {
+	envVars := make(resources.EnvironmentVariables, len(env))
+	for k, v := range env {
+		envVars[k] = StringToFilteredString(v)
+	}
+	return envVars
+}
+
+// EnvironmentVariablesToMap :
+// Convert resources.EnvironmentVariables to map[string]string
+func EnvironmentVariablesToMap(vars resources.EnvironmentVariables) map[string]string {
+	env := make(map[string]string, len(vars))
+	for k, v := range vars {
+		env[k] = v.String()
+	}
+	return env
+}
+
+func IsErrNotAuthorized(err error) bool {
+	if _, ok := err.(ccerror.ForbiddenError); ok {
+		return true
+	}
+	if httpErr, ok := err.(ccerror.RawHTTPStatusError); ok && httpErr.StatusCode == 403 {
+		return true
+	}
+	if uaaErr, ok := err.(uaa.RawHTTPStatusError); ok && uaaErr.StatusCode == 403 {
+		return true
+	}
+	return false
+}
+
+func IsErrNotFound(err error) bool {
+	if httpErr, ok := err.(ccerror.RawHTTPStatusError); ok && httpErr.StatusCode == 404 {
+		return true
+	}
+	if _, ok := err.(ccerror.ResourceNotFoundError); ok {
+		return true
+	}
+	if uaaErr, ok := err.(uaa.RawHTTPStatusError); ok && uaaErr.StatusCode == 404 {
+		return true
+	}
+	return false
+}
+
+type PollingConfig struct {
+	Session  *managers.Session
+	JobURL   ccv3.JobURL
+	Interval time.Duration
+	Timeout  time.Duration
+}
+
+// PollAsyncJob periodically check the state of the async job, return when the job failed / completed or Timeout is reached
+func PollAsyncJob(config PollingConfig) error {
+	s := config.Session
+
+	if config.Interval == 0 {
+		config.Interval = 5 * time.Second
+	}
+	if config.Timeout == 0 {
+		config.Timeout = 60 * time.Second
+	}
+	return common.PollingWithTimeout(func() (bool, error) {
+		job, _, err := s.ClientV3.GetJob(config.JobURL)
+		if err != nil {
+			return true, err
+		}
+
+		// Stop polling and return error if job failed
+		if job.State == constantV3.JobFailed {
+			return true, fmt.Errorf(
+				"Operation failed, reason: %+v",
+				job.Errors(),
+			)
+		}
+
+		// Check binding state if job completed
+		if job.State == constantV3.JobComplete {
+			return true, nil
+		}
+		// Last operation initial or inprogress or job not completed, continue polling
+		return false, nil
+	}, config.Interval, config.Timeout)
 }

@@ -1,1 +1,1 @@
-I 2goXhrcloudfoundry/managers/config.go
+I 2goX·hr)cloudfoundry/managers/bits/bitsmanager.go

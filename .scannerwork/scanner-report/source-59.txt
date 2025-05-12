@@ -1,45 +1,32 @@
 package cloudfoundry
 
 import (
-	"testing"
-
+	"context"
 	"fmt"
+	"github.com/terraform-providers/terraform-provider-cloudfoundry/cloudfoundry/managers"
 
-	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/resource"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
 )
 
-func TestAccServicePlanAccess_importBasic(t *testing.T) {
+func resourceServicePlanAccessImport(ctx context.Context, d *schema.ResourceData, meta interface{}) ([]*schema.ResourceData, error) {
+	session := meta.(*managers.Session)
+	if session == nil {
+		return []*schema.ResourceData{}, fmt.Errorf("client is nil")
+	}
 
-	serviceBrokerURL, serviceBrokerUser, serviceBrokerPassword, serviceBrokerPlanPath := getTestBrokerCredentials(t)
+	spV, _, err := session.ClientV2.GetServicePlanVisibility(d.Id())
+	if err == nil {
+		d.Set("plan", spV.ServicePlanGUID)
+		d.Set("org", spV.OrganizationGUID)
+		return ImportReadContext(resourceServicePlanAccessRead)(ctx, d, meta)
+	}
 
-	// Ensure any test artifacts from a
-	// failed run are deleted if the exist
-	deleteServiceBroker("test")
+	plan, _, err := session.ClientV2.GetServicePlan(d.Id())
+	if err == nil {
+		d.Set("plan", d.Id())
+		d.Set("public", plan.Public)
+		return ImportReadContext(resourceServicePlanAccessRead)(ctx, d, meta)
+	}
 
-	orgID, _ := defaultTestOrg(t)
-	resourceName := "cloudfoundry_service_plan_access.test-access"
-
-	var servicePlanAccessGUID string
-
-	resource.Test(t,
-		resource.TestCase{
-			PreCheck:          func() { testAccPreCheck(t) },
-			ProviderFactories: testAccProvidersFactories,
-			CheckDestroy:      testAccCheckServicePlanAccessDestroyed(servicePlanAccessGUID),
-			Steps: []resource.TestStep{
-				resource.TestStep{
-					Config: fmt.Sprintf(saResource,
-						serviceBrokerURL,
-						serviceBrokerUser,
-						serviceBrokerPassword,
-						serviceBrokerPlanPath,
-						orgID),
-				},
-				resource.TestStep{
-					ResourceName:      resourceName,
-					ImportState:       true,
-					ImportStateVerify: true,
-				},
-			},
-		})
+	return []*schema.ResourceData{}, fmt.Errorf("unable to find service_plan_visibilities nor service plan for id '%s'", d.Id())
 }

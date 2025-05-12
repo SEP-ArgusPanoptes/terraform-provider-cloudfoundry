@@ -1,107 +1,73 @@
 package cloudfoundry
 
 import (
-	"context"
-
-	"code.cloudfoundry.org/cli/api/cloudcontroller/ccv3"
-	"github.com/hashicorp/terraform-plugin-sdk/v2/diag"
+	"code.cloudfoundry.org/cli/api/cloudcontroller/ccv2"
+	"code.cloudfoundry.org/cli/api/cloudcontroller/ccv2/constant"
+	"fmt"
 	"github.com/terraform-providers/terraform-provider-cloudfoundry/cloudfoundry/managers"
+	"testing"
 
-	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/resource"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/terraform"
 )
 
-func dataSourceSpace() *schema.Resource {
+const serviceDataResource = `
 
-	return &schema.Resource{
+data "cloudfoundry_service" "test" {
+    name = "%s"
+}
+`
 
-		ReadContext: dataSourceSpaceRead,
+func TestAccDataSourceService_normal(t *testing.T) {
 
-		Schema: map[string]*schema.Schema{
+	serviceName1, _, servicePlan := getTestServiceBrokers(t)
 
-			"name": &schema.Schema{
-				Type:     schema.TypeString,
-				Required: true,
+	ref := "data.cloudfoundry_service.test"
+
+	resource.ParallelTest(t,
+		resource.TestCase{
+			PreCheck:          func() { testAccPreCheck(t) },
+			ProviderFactories: testAccProvidersFactories,
+			Steps: []resource.TestStep{
+
+				resource.TestStep{
+					Config: fmt.Sprintf(serviceDataResource,
+						serviceName1),
+					Check: resource.ComposeTestCheckFunc(
+						checkDataSourceServiceExists(ref),
+						resource.TestCheckResourceAttr(
+							ref, "name", serviceName1),
+						resource.TestCheckResourceAttrSet(
+							ref, "service_plans."+servicePlan),
+					),
+				},
 			},
-			"org_name": &schema.Schema{
-				Type:          schema.TypeString,
-				Optional:      true,
-				Computed:      true,
-				ConflictsWith: []string{"org"},
-			},
-			"org": &schema.Schema{
-				Type:          schema.TypeString,
-				Optional:      true,
-				Computed:      true,
-				ConflictsWith: []string{"org_name"},
-			},
-			"quota": &schema.Schema{
-				Type:     schema.TypeString,
-				Computed: true,
-			},
-			labelsKey:      labelsSchema(),
-			annotationsKey: annotationsSchema(),
-		},
-	}
+		})
 }
 
-func dataSourceSpaceRead(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
+func checkDataSourceServiceExists(resource string) resource.TestCheckFunc {
 
-	session := meta.(*managers.Session)
-	if session == nil {
-		return diag.Errorf("client is nil")
-	}
+	return func(s *terraform.State) error {
 
-	name := d.Get("name").(string)
+		session := testAccProvider.Meta().(*managers.Session)
 
-	if d.Get("org").(string) == "" && d.Get("org_name").(string) == "" {
-		return diag.Errorf("You must provide either 'org' or 'org_name' attribute")
-	}
+		rs, ok := s.RootModule().Resources[resource]
+		if !ok {
+			return fmt.Errorf("service '%s' not found in terraform state", resource)
+		}
 
-	orgId := d.Get("org").(string)
-	orgName := d.Get("org_name").(string)
-	if d.Get("org_name").(string) != "" {
-		orgs, _, err := session.ClientV3.GetOrganizations(ccv3.Query{
-			Key:    "names",
-			Values: []string{orgName},
-		})
+		id := rs.Primary.ID
+		name := rs.Primary.Attributes["name"]
+
+		services, _, err := session.ClientV2.GetServices(ccv2.FilterEqual(constant.LabelFilter, name))
 		if err != nil {
-			return diag.FromErr(err)
+			return err
 		}
-		if len(orgs) == 0 {
-			return diag.Errorf("Can't found org with name %s", orgName)
+		if len(services) == 0 {
+			return NotFound
 		}
-		orgId = orgs[0].GUID
-	} else {
-		org, _, err := session.ClientV3.GetOrganization(orgId)
-		if err != nil {
-			return diag.FromErr(err)
-		}
-		orgName = org.Name
-	}
-	nameQuery := ccv3.Query{
-		Key:    ccv3.NameFilter,
-		Values: []string{name},
-	}
-	orgQuery := ccv3.Query{
-		Key:    ccv3.OrganizationGUIDFilter,
-		Values: []string{orgId},
-	}
-	spaces, _, _, err := session.ClientV3.GetSpaces(nameQuery, orgQuery)
-	if err != nil {
-		return diag.FromErr(err)
-	}
-	if len(spaces) == 0 {
-		return diag.FromErr(NotFound)
-	}
-	space := spaces[0]
-	d.SetId(space.GUID)
-	d.Set("org_name", orgName)
-	d.Set("org", orgId)
-	d.Set("quota", space.Relationships["quota"].GUID)
+		err = assertSame(id, services[0].GUID)
 
-	err = metadataRead(spaceMetadata, d, meta, true)
-	if err != nil {
-		return diag.FromErr(err)
+		return err
 	}
-	return diag.FromErr(err)
 }

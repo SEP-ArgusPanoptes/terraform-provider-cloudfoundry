@@ -6,263 +6,72 @@ import (
 
 	"code.cloudfoundry.org/cli/api/cloudcontroller/ccv3"
 	"code.cloudfoundry.org/cli/api/cloudcontroller/ccv3/constant"
-	constantV3 "code.cloudfoundry.org/cli/api/cloudcontroller/ccv3/constant"
-
 	"code.cloudfoundry.org/cli/resources"
 	"github.com/terraform-providers/terraform-provider-cloudfoundry/cloudfoundry/common"
-	"github.com/terraform-providers/terraform-provider-cloudfoundry/cloudfoundry/managers/bits"
 )
 
-// Standard is the standard deployment strategy using v3 API
-type Standard struct {
-	bitsManager *bits.BitsManager
-	client      *ccv3.Client
-	runBinder   *RunBinder
-}
+// StageApplicationPackage : stage application package
+func (a Actor) StageApplicationPackage(appDeploy AppDeploy, reverse FallbackFunction) Action {
+	return Action{
+		Forward: func(ctx Context) (Context, error) {
 
-// NewStandard initializes a v3 standard deployment strategy
-func NewStandard(bitsManager *bits.BitsManager, client *ccv3.Client, runBinder *RunBinder) *Standard {
-	return &Standard{
-		bitsManager: bitsManager,
-		client:      client,
-		runBinder:   runBinder,
-	}
-}
+			appResp := ctx["app_response"].(AppDeployResponse)
 
-// Deploy an application using standard deployment strategy
-func (s Standard) Deploy(appDeploy AppDeploy) (AppDeployResponse, error) {
-	stateAsk := appDeploy.App.State
-	var deployFunc func(app resources.Application) (resources.Application, ccv3.Warnings, error)
-	if appDeploy.App.GUID != "" {
-		deployFunc = s.client.UpdateApplication
-	} else {
-		deployFunc = s.client.CreateApplication
-	}
-	defaultReverse := func(ctx Context) error {
-		appResp := ctx["app_response"].(AppDeployResponse)
-		if appResp.App.GUID == "" {
-			return nil
-		}
-		// Stop app then delete
-		app, _, err := s.client.UpdateApplicationStop(appResp.App.GUID)
-		if err != nil {
-			return err
-		}
-
-		jobURL, _, err := s.client.DeleteApplication(app.GUID)
-		if err != nil {
-			return err
-		}
-
-		err = common.PollingWithTimeout(func() (bool, error) {
-			job, _, err := s.client.GetJob(jobURL)
+			// Get newest READY package for an app
+			pkg, err := a.GetMostRecentPackage(appResp.App)
 			if err != nil {
-				return true, err
-			}
-
-			// Stop polling and return error if job failed
-			if job.State == constantV3.JobFailed {
-				return true, fmt.Errorf(
-					"Operation failed, reason: %+v",
-					job.Errors(),
-				)
-			}
-
-			if job.State == constantV3.JobComplete {
-				return true, nil
-			}
-
-			return false, nil
-		}, 5*time.Second, 1*time.Minute)
-		return err
-	}
-	actions := Actions{
-		{
-			Forward: func(ctx Context) (Context, error) {
-				app := appDeploy.App
-				app.State = constant.ApplicationStopped
-				// If update app, remove spaceGUID request body
-				// if space changes, force new ( delete + recreate )
-				if app.GUID != "" {
-					app.SpaceGUID = ""
-				}
-
-				if appDeploy.IsDockerImage() {
-					app.LifecycleType = constant.AppLifecycleTypeDocker
-				} else {
-					app.LifecycleType = constant.AppLifecycleTypeBuildpack
-				}
-
-				app, _, err := deployFunc(app)
-				if err != nil {
-					return ctx, err
-				}
-
-				createdEnv, _, err := s.bitsManager.UpdateAppEnvironment(app.GUID, appDeploy.EnvVars)
-				if err != nil {
-					return ctx, err
-				}
-
-				// Set ssh_enabled
-				if appDeploy.EnableSSH.IsSet {
-					_, err = s.client.UpdateAppFeature(app.GUID, appDeploy.EnableSSH.Value, "ssh")
-					if err != nil {
-						return ctx, err
-					}
-				}
-				enabledSSH, _, err := s.client.GetAppFeature(app.GUID, "ssh")
-				if err != nil {
-					return ctx, err
-				}
-
-				ctx["app_response"] = AppDeployResponse{
-					App:        app,
-					EnableSSH:  AppFeatureToNullBool(enabledSSH),
-					EnvVars:    createdEnv,
-					Process:    appDeploy.Process,
-					AppPackage: appDeploy.AppPackage,
-				}
-				return ctx, nil
-			},
-		},
-		{
-			Forward: func(ctx Context) (Context, error) {
-				appResp := ctx["app_response"].(AppDeployResponse)
-				mappings, err := s.runBinder.MapRoutes(AppDeploy{
-					App:          appResp.App,
-					Mappings:     appDeploy.Mappings,
-					StageTimeout: appDeploy.StageTimeout,
-					BindTimeout:  appDeploy.BindTimeout,
-					StartTimeout: appDeploy.StartTimeout,
-				})
-				if err != nil {
-					return ctx, err
-				}
-				ctx["app_response"] = AppDeployResponse{
-					App:       appResp.App,
-					EnableSSH: appResp.EnableSSH,
-					EnvVars:   appResp.EnvVars,
-					Mappings:  mappings,
-				}
-				return ctx, nil
-			},
-			ReversePrevious: defaultReverse,
-		},
-		{
-			Forward: func(ctx Context) (Context, error) {
-				appResp := ctx["app_response"].(AppDeployResponse)
-				bindings, err := s.runBinder.BindServiceInstances(AppDeploy{
-					App:             appResp.App,
-					ServiceBindings: appDeploy.ServiceBindings,
-					StageTimeout:    appDeploy.StageTimeout,
-					BindTimeout:     appDeploy.BindTimeout,
-					StartTimeout:    appDeploy.StartTimeout,
-				})
-				if err != nil {
-					return ctx, err
-				}
-
-				ctx["app_response"] = AppDeployResponse{
-					App:             appResp.App,
-					EnableSSH:       appResp.EnableSSH,
-					EnvVars:         appResp.EnvVars,
-					Mappings:        appResp.Mappings,
-					ServiceBindings: bindings,
-				}
-				return ctx, nil
-			},
-			ReversePrevious: defaultReverse,
-		},
-		{
-			Forward: func(ctx Context) (Context, error) {
-				appResp := ctx["app_response"].(AppDeployResponse)
-
-				var pkg resources.Package
-				var err error
-				if appResp.App.LifecycleType == constant.AppLifecycleTypeDocker {
-					pkg, _, err = s.bitsManager.CreateDockerPackage(appResp.App.GUID, appDeploy.AppPackage.DockerImage, appDeploy.AppPackage.DockerUsername, appDeploy.AppPackage.DockerPassword)
-				} else {
-					// Bits will be loaded entirely into memory for each app
-					// If Path = "", bits will be copied
-					if appDeploy.Path == "" {
-						return ctx, nil
-					}
-					pkg, _, err = s.bitsManager.CreateAndUploadBitsPackage(appResp.App.GUID, appDeploy.Path, appDeploy.StageTimeout)
-				}
-				if err != nil {
-					return ctx, err
-				}
-				ctx["app_response"] = AppDeployResponse{
-					App:             appResp.App,
-					EnableSSH:       appResp.EnableSSH,
-					EnvVars:         appResp.EnvVars,
-					Mappings:        appResp.Mappings,
-					ServiceBindings: appResp.ServiceBindings,
-					AppPackage:      pkg,
-				}
-				return ctx, nil
-			},
-			ReversePrevious: defaultReverse,
-		},
-		{
-			Forward: func(ctx Context) (Context, error) {
-				if stateAsk == constant.ApplicationStopped {
-					return ctx, nil
-				}
-
-				appResp := ctx["app_response"].(AppDeployResponse)
-				app, proc, err := s.runBinder.Restart(AppDeploy{
-					App:          appResp.App,
-					Process:      appDeploy.Process,
-					EnableSSH:    appDeploy.EnableSSH,
-					AppPackage:   appDeploy.AppPackage,
-					EnvVars:      appDeploy.EnvVars,
-					StageTimeout: appDeploy.StageTimeout,
-					BindTimeout:  appDeploy.BindTimeout,
-					StartTimeout: appDeploy.StartTimeout,
-				})
-				if err != nil {
-					return ctx, err
-				}
-
-				// Get process information
-				// appProcess, _, err := s.client.GetApplicationProcessByType(app.GUID, constant.ProcessTypeWeb)
-
-				ctx["app_response"] = AppDeployResponse{
-					App:             app,
-					Process:         proc,
-					ServiceBindings: appResp.ServiceBindings,
-					Mappings:        appResp.Mappings,
-					AppPackage:      appResp.AppPackage,
-					EnableSSH:       appResp.EnableSSH,
-					EnvVars:         appResp.EnvVars,
-				}
 				return ctx, err
-			},
-			ReversePrevious: defaultReverse,
-		},
-	}
-	var appResp AppDeployResponse
-	ctx, err := actions.Execute()
-	if appRespCtx, ok := ctx["app_response"]; ok {
-		appResp = appRespCtx.(AppDeployResponse)
-	}
-	if stateAsk == constant.ApplicationStopped || err != nil {
-		appResp.App.State = constant.ApplicationStopped
-	} else {
-		appResp.App.State = constant.ApplicationStarted
-	}
+			}
+			// Get first package in the list
+			packageGUID := pkg.GUID
 
-	return appResp, err
+			// Stage the package
+			build, _, err := a.client.CreateBuild(resources.Build{
+				PackageGUID: packageGUID,
+			})
+			if err != nil {
+				return ctx, err
+			}
+
+			// Poll once every 5 sec, timeout ${stageTimeout} fixed by appDeploy
+			err = a.WaitStaging(build.GUID, appDeploy.StageTimeout)
+
+			if err != nil {
+				return ctx, err
+			}
+
+			// Get staged package
+			stagedBuild, _, err := a.client.GetBuild(build.GUID)
+			if err != nil {
+				return ctx, err
+			}
+			droplet, _, err := a.client.GetDroplet(stagedBuild.DropletGUID)
+			if err != nil {
+				return ctx, err
+			}
+
+			ctx["app_response"] = AppDeployResponse{
+				App:             appResp.App,
+				Process:         appResp.Process,
+				ServiceBindings: appResp.ServiceBindings,
+				Mappings:        appResp.Mappings,
+				AppPackage:      pkg,
+				EnableSSH:       appResp.EnableSSH,
+				EnvVars:         appResp.EnvVars,
+			}
+			ctx["droplet"] = droplet
+
+			return ctx, err
+		},
+		ReversePrevious: reverse,
+	}
 }
 
-// Restage is deprecated in v3 and replaced by the build resource
-func (s Standard) Restage(appDeploy AppDeploy) (AppDeployResponse, error) {
-
-	// Get newest READY package for an app
-	packages, _, err := s.client.GetPackages(ccv3.Query{
+// GetMostRecentPackage : get ready packages ordered by creation date (reverse)
+func (a Actor) GetMostRecentPackage(app resources.Application) (resources.Package, error) {
+	packages, _, err := a.client.GetPackages(ccv3.Query{
 		Key:    ccv3.AppGUIDFilter,
-		Values: []string{appDeploy.App.GUID},
+		Values: []string{app.GUID},
 	}, ccv3.Query{
 		Key:    ccv3.StatesFilter,
 		Values: []string{"READY"},
@@ -271,19 +80,20 @@ func (s Standard) Restage(appDeploy AppDeploy) (AppDeployResponse, error) {
 		Values: []string{"-created_at"},
 	})
 	if err != nil {
-		return AppDeployResponse{}, err
+		return resources.Package{}, err
+	}
+	if len(packages) < 1 {
+		return resources.Package{}, fmt.Errorf("No READY package found")
 	}
 
-	// Stage the package
-	build, _, err := s.client.CreateBuild(resources.Build{
-		PackageGUID: packages[0].GUID,
-	})
-	if err != nil {
-		return AppDeployResponse{}, err
-	}
+	return packages[0], nil
+}
 
-	err = common.PollingWithTimeout(func() (bool, error) {
-		ccBuild, _, err := s.client.GetBuild(build.GUID)
+// WaitStaging : poll status of the created build with timeout
+func (a Actor) WaitStaging(buildGUID string, stageTimeout time.Duration) error {
+	return common.PollingWithTimeout(func() (bool, error) {
+
+		ccBuild, _, err := a.client.GetBuild(buildGUID)
 		if err != nil {
 			return true, err
 		}
@@ -293,65 +103,9 @@ func (s Standard) Restage(appDeploy AppDeploy) (AppDeployResponse, error) {
 		}
 
 		if ccBuild.State == constant.BuildFailed {
-			return true, fmt.Errorf("Package staging failed")
+			return true, fmt.Errorf("Package staging failed: %s", ccBuild.Error)
 		}
 
 		return false, nil
-	}, 5*time.Second, appDeploy.StageTimeout)
-
-	if err != nil {
-		return AppDeployResponse{}, err
-	}
-
-	createdBuild, _, err := s.client.GetBuild(build.GUID)
-	if err != nil {
-		return AppDeployResponse{}, err
-	}
-
-	// Stop the app
-	app, _, err := s.client.UpdateApplicationStop(appDeploy.App.GUID)
-	if err != nil {
-		return AppDeployResponse{}, err
-	}
-	appDeploy.App = app
-
-	// Set droplet
-	_, _, err = s.client.SetApplicationDroplet(appDeploy.App.GUID, createdBuild.DropletGUID)
-	if err != nil {
-		return AppDeployResponse{}, err
-	}
-
-	// Start application
-	app, proc, err := s.runBinder.Start(appDeploy)
-	if err != nil {
-		return AppDeployResponse{}, err
-	}
-	appDeploy.App = app
-
-	appResp := AppDeployResponse{
-		App:             app,
-		Process:         proc,
-		Mappings:        appDeploy.Mappings,
-		ServiceBindings: appDeploy.ServiceBindings,
-		AppPackage:      appDeploy.AppPackage,
-		EnableSSH:       appDeploy.EnableSSH,
-		EnvVars:         appDeploy.EnvVars,
-	}
-
-	if appDeploy.App.State == constant.ApplicationStopped {
-		err := s.runBinder.Stop(appDeploy)
-		return appResp, err
-	}
-
-	return appResp, nil
-}
-
-// IsCreateNewApp returns false since we are not creating a new app during rolling deployment
-func (s Standard) IsCreateNewApp() bool {
-	return false
-}
-
-// Names defines acceptable names that can be passed to terraform
-func (s Standard) Names() []string {
-	return []string{"standard", "v2", DefaultStrategy}
+	}, 5*time.Second, stageTimeout)
 }

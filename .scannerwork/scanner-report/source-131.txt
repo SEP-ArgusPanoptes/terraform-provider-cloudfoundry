@@ -1,200 +1,221 @@
 package cloudfoundry
 
 import (
-	"fmt"
-	"testing"
+	"context"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/diag"
+	"strings"
 
 	"code.cloudfoundry.org/cli/api/cloudcontroller/ccv2"
-	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/resource"
-	"github.com/hashicorp/terraform-plugin-sdk/v2/terraform"
+	"code.cloudfoundry.org/cli/api/cloudcontroller/ccv2/constant"
+	"github.com/hashicorp/go-uuid"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
 	"github.com/terraform-providers/terraform-provider-cloudfoundry/cloudfoundry/managers"
 )
 
-const orgUsersResource = `
-resource "cloudfoundry_user" "tl" {
-	name = "teamlead@acme.com"
-	password = "password"
-}
-resource "cloudfoundry_user" "dev1" {
-    name = "developer1@acme.com"
-	password = "password"
-}
-resource "cloudfoundry_user" "dev2" {
-    name = "developer2@acme.com"
-	password = "password"
-}
-resource "cloudfoundry_user" "dev3" {
-    name = "developer3@acme.com"
-	password = "password"
-}
-resource "cloudfoundry_user" "adr" {
-    name = "auditor@acme.com"
-	password = "password"
+var orgRoleMap = map[string]constant.UserRole{
+	"managers":         constant.OrgManager,
+	"billing_managers": constant.BillingManager,
+	"auditors":         constant.OrgAuditor,
 }
 
-resource "cloudfoundry_org_users" "org_users1" {
-	org = "%s"
-    managers = [
-        "${cloudfoundry_user.tl.id}"
-    ]
-    billing_managers = [
-        "${cloudfoundry_user.tl.id}",
-        "${cloudfoundry_user.dev1.id}",
-		"${cloudfoundry_user.dev2.id}"
-    ]
-    auditors = [
-        "${cloudfoundry_user.adr.id}",
-		"${cloudfoundry_user.dev3.id}",
-        "username@acme.com"
-    ]
-}
-`
+func resourceOrgUsers() *schema.Resource {
 
-const orgUsersResourceUpdate = `
-resource "cloudfoundry_user" "dev1" {
-    name = "developer1@acme.com"
-	password = "password"
-}
+	return &schema.Resource{
 
-resource "cloudfoundry_org_users" "org_users1" {
-	org = "%s"
-	managers = []
-    billing_managers = [
-        "${cloudfoundry_user.dev1.id}",
-    ]
-	auditors = []
-}
-`
+		CreateContext: resourceOrgUsersCreate,
+		ReadContext:   resourceOrgUsersRead,
+		UpdateContext: resourceOrgUsersUpdate,
+		DeleteContext: resourceOrgUsersDelete,
 
-const orgUsersResourceForce = `
-resource "cloudfoundry_user" "dev1" {
-    name = "developer1@acme.com"
-	password = "password"
-}
+		Importer: &schema.ResourceImporter{
+			StateContext: ImportReadContext(resourceOrgUsersRead),
+		},
 
-resource "cloudfoundry_org_users" "org_users1" {
-	org = "%s"
-    billing_managers = [
-        "${cloudfoundry_user.dev1.id}",
-    ]
-	force = true
-}
-`
-
-func TestAccResOrgUsers_normal(t *testing.T) {
-	ref := "cloudfoundry_org_users.org_users1"
-	orgId, _ := defaultTestOrg(t)
-	usersMap := make(map[string][]ccv2.User)
-
-	sessions := testSession()
-	user, err := sessions.ClientUAA.CreateUser("username@acme.com", "paasw0rd", "uaa")
-	if err != nil {
-		t.Fatal(err.Error())
-	}
-	defer func() {
-		_ = sessions.ClientUAA.DeleteUser(user.ID)
-	}()
-	err = addOrNothingUserInOrgBySpace(sessions, orgId, user.ID, false)
-	if err != nil {
-		t.Fatal(err.Error())
-	}
-
-	resource.Test(t,
-		resource.TestCase{
-			PreCheck:          func() { testAccPreCheck(t) },
-			ProviderFactories: testAccProvidersFactories,
-			Steps: []resource.TestStep{
-				{
-					Config: fmt.Sprintf(orgUsersResource, orgId),
-					Check: resource.ComposeTestCheckFunc(
-						testAccCheckOrgUsersExists(ref, &usersMap),
-						resource.TestCheckResourceAttr(
-							ref, "managers.#", "1"),
-						resource.TestCheckResourceAttr(
-							ref, "billing_managers.#", "3"),
-						resource.TestCheckResourceAttr(
-							ref, "auditors.#", "3"),
-					),
-				},
-
-				{
-					Config: fmt.Sprintf(orgUsersResourceUpdate, orgId),
-					Check: resource.ComposeTestCheckFunc(
-						testAccCheckOrgUsersExists(ref, &usersMap),
-						testAccCheckMapUserInside("developer1@acme.com", "billing_managers", &usersMap),
-						resource.TestCheckResourceAttr(
-							ref, "managers.#", "0"),
-						resource.TestCheckResourceAttr(
-							ref, "billing_managers.#", "1"),
-						resource.TestCheckResourceAttr(
-							ref, "auditors.#", "0"),
-					),
-				},
+		Schema: map[string]*schema.Schema{
+			"org": &schema.Schema{
+				Type:     schema.TypeString,
+				ForceNew: true,
+				Required: true,
 			},
-		})
-}
-
-func TestAccResOrgUsers_force(t *testing.T) {
-	ref := "cloudfoundry_org_users.org_users1"
-	orgId, _ := defaultTestOrg(t)
-	usersMap := make(map[string][]ccv2.User)
-
-	sessions := testSession()
-	user, err := sessions.ClientUAA.CreateUser("test-acc-force@acme.com", "paasw0rd", "uaa")
-	if err != nil {
-		t.Fatal(err.Error())
-	}
-	defer func() {
-		_ = sessions.ClientUAA.DeleteUser(user.ID)
-	}()
-
-	_, err = sessions.ClientV2.UpdateOrganizationManager(orgId, user.ID)
-	if err != nil {
-		t.Fatal(err.Error())
-	}
-
-	resource.Test(t,
-		resource.TestCase{
-			PreCheck:          func() { testAccPreCheck(t) },
-			ProviderFactories: testAccProvidersFactories,
-			Steps: []resource.TestStep{
-				{
-					Config: fmt.Sprintf(orgUsersResourceForce, orgId),
-					Check: resource.ComposeTestCheckFunc(
-						testAccCheckOrgUsersExists(ref, &usersMap),
-						testAccCheckMapUsersNumber(1, &usersMap),
-						testAccCheckMapUserInside("developer1@acme.com", "billing_managers", &usersMap),
-						resource.TestCheckResourceAttr(
-							ref, "billing_managers.#", "1"),
-					),
-				},
+			"force": &schema.Schema{
+				Type:     schema.TypeBool,
+				Optional: true,
+				Default:  false,
 			},
-		})
+			"managers": &schema.Schema{
+				Type:       schema.TypeSet,
+				ConfigMode: schema.SchemaConfigModeAttr,
+				Computed:   true,
+				Optional:   true,
+				Elem:       &schema.Schema{Type: schema.TypeString},
+				Set:        resourceStringHash,
+			},
+			"billing_managers": &schema.Schema{
+				Type:       schema.TypeSet,
+				ConfigMode: schema.SchemaConfigModeAttr,
+				Computed:   true,
+				Optional:   true,
+				Elem:       &schema.Schema{Type: schema.TypeString},
+				Set:        resourceStringHash,
+			},
+			"auditors": &schema.Schema{
+				Type:       schema.TypeSet,
+				ConfigMode: schema.SchemaConfigModeAttr,
+				Computed:   true,
+				Optional:   true,
+				Elem:       &schema.Schema{Type: schema.TypeString},
+				Set:        resourceStringHash,
+			},
+		},
+	}
 }
 
-func testAccCheckOrgUsersExists(resource string, users *map[string][]ccv2.User) resource.TestCheckFunc {
-	return func(s *terraform.State) error {
-		session := testAccProvider.Meta().(*managers.Session)
-
-		rs, ok := s.RootModule().Resources[resource]
-		if !ok {
-			return fmt.Errorf("Not found: %s", resource)
-		}
-		attributes := rs.Primary.Attributes
-
-		sm := session.ClientV2
-		usersMap := make(map[string][]ccv2.User)
-		for t, r := range orgRoleMap {
-			users, _, err := sm.GetOrganizationUsersByRole(r, attributes["org"])
+func resourceOrgUsersCreate(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
+	id, err := uuid.GenerateUUID()
+	if err != nil {
+		return diag.FromErr(err)
+	}
+	session := meta.(*managers.Session)
+	orgId := d.Get("org").(string)
+	d.SetId(id)
+	if d.Get("force").(bool) {
+		for _, r := range orgRoleMap {
+			users, _, err := session.ClientV2.GetOrganizationUsersByRole(r, orgId)
 			if err != nil {
-				return err
+				return diag.FromErr(err)
 			}
-			usersMap[t] = users
+			for _, u := range users {
+				_, err := session.ClientV2.DeleteOrganizationUserByRole(r, orgId, u.GUID)
+				if err != nil {
+					return diag.FromErr(err)
+				}
+			}
+
 		}
-		if len(usersMap) == 0 {
-			return fmt.Errorf("No org users found")
+	}
+	return resourceOrgUsersUpdate(ctx, d, meta)
+}
+
+func resourceOrgUsersRead(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
+	if IsImportState(d) {
+		d.Set("org", d.Id())
+	}
+	session := meta.(*managers.Session)
+	for t, r := range orgRoleMap {
+		users, _, err := session.ClientV2.GetOrganizationUsersByRole(r, d.Get("org").(string))
+		if err != nil {
+			return diag.FromErr(err)
 		}
-		*users = usersMap
+		tfUsers := d.Get(t).(*schema.Set).List()
+		if d.Get("force").(bool) || IsImportState(d) {
+			usersByUsername := intersectSlices(tfUsers, users, func(source, item interface{}) bool {
+
+				return strings.EqualFold(source.(string), item.(ccv2.User).Username)
+			})
+			d.Set(t, schema.NewSet(resourceStringHash, objectsToIds(users, func(object interface{}) string {
+				if isInSlice(usersByUsername, func(userByUsername interface{}) bool {
+					return strings.EqualFold(object.(ccv2.User).Username, userByUsername.(string))
+				}) {
+					return object.(ccv2.User).Username
+				}
+				return object.(ccv2.User).GUID
+			})))
+		} else {
+			finalUsers := intersectSlices(tfUsers, users, func(source, item interface{}) bool {
+				return source.(string) == item.(ccv2.User).GUID || strings.EqualFold(source.(string), item.(ccv2.User).Username)
+			})
+			d.Set(t, schema.NewSet(resourceStringHash, finalUsers))
+		}
+	}
+	return nil
+}
+
+func resourceOrgUsersUpdate(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
+	session := meta.(*managers.Session)
+	orgId := d.Get("org").(string)
+	for t, r := range orgRoleMap {
+		remove, add := getListChanges(d.GetChange(t))
+		for _, uid := range remove {
+			byUsername := true
+			_, err := uuid.ParseUUID(uid)
+			if err == nil {
+				byUsername = false
+			}
+			err = deleteOrgUserByRole(session, r, orgId, uid, byUsername)
+			if err != nil {
+				return diag.FromErr(err)
+			}
+		}
+		for _, uid := range add {
+			byUsername := true
+			_, err := uuid.ParseUUID(uid)
+			if err == nil {
+				byUsername = false
+			}
+			err = updateOrgUserByRole(session, r, orgId, uid, byUsername)
+			if err != nil {
+				return diag.FromErr(err)
+			}
+		}
+	}
+	return nil
+}
+
+func resourceOrgUsersDelete(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
+	orgId := d.Get("org").(string)
+	session := meta.(*managers.Session)
+	for t, r := range orgRoleMap {
+		tfUsers := d.Get(t).(*schema.Set).List()
+		for _, uid := range tfUsers {
+			_, err := session.ClientV2.DeleteOrganizationUserByRole(r, orgId, uid.(string))
+			if err != nil {
+				return diag.FromErr(err)
+			}
+		}
+	}
+	return nil
+}
+
+func updateOrgUserByRole(session *managers.Session, role constant.UserRole, guid string, guidOrUsername string, byUsername bool) error {
+	if !byUsername {
+		_, err := session.ClientV2.UpdateOrganizationUserByRole(role, guid, guidOrUsername)
+		if err != nil {
+			return err
+		}
 		return nil
 	}
+	var err error
+	switch role {
+	case constant.OrgAuditor:
+		_, err = session.ClientV2.UpdateOrganizationAuditorByUsername(guid, guidOrUsername)
+	case constant.OrgManager:
+		_, err = session.ClientV2.UpdateOrganizationManagerByUsername(guid, guidOrUsername)
+	case constant.BillingManager:
+		_, err = session.ClientV2.UpdateOrganizationBillingManagerByUsername(guid, guidOrUsername)
+	default:
+		_, err = session.ClientV2.UpdateOrganizationUserByUsername(guid, guidOrUsername)
+	}
+	return err
+}
+
+func deleteOrgUserByRole(session *managers.Session, role constant.UserRole, guid string, guidOrUsername string, byUsername bool) error {
+	if !byUsername {
+		_, err := session.ClientV2.DeleteOrganizationUserByRole(role, guid, guidOrUsername)
+		if err != nil {
+			return err
+		}
+		return nil
+	}
+	var err error
+	switch role {
+	case constant.OrgAuditor:
+		_, err = session.ClientV2.DeleteOrganizationAuditorByUsername(guid, guidOrUsername)
+	case constant.OrgManager:
+		_, err = session.ClientV2.DeleteOrganizationManagerByUsername(guid, guidOrUsername)
+	case constant.BillingManager:
+		_, err = session.ClientV2.DeleteOrganizationBillingManagerByUsername(guid, guidOrUsername)
+	default:
+		_, err = session.ClientV2.DeleteOrganizationUserByUsername(guid, guidOrUsername)
+	}
+	return err
 }

@@ -6,23 +6,26 @@ import (
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/resource"
 )
 
-func TestAccSpace_importBasic(t *testing.T) {
-	resourceName := "cloudfoundry_space.space1"
+func TestAccSpaceQuota_importBasic(t *testing.T) {
+
+	orgID, _ := defaultTestOrg(t)
+
+	resourceName := "cloudfoundry_space_quota.quota10g-space"
+	quotaname := "10g-space"
 
 	resource.Test(t,
 		resource.TestCase{
 			PreCheck:          func() { testAccPreCheck(t) },
 			ProviderFactories: testAccProvidersFactories,
-			CheckDestroy:      testAccCheckSpaceDestroyed("space-one"),
+			CheckDestroy:      testAccCheckSpaceQuotaResourceDestroy(quotaname, orgID),
 			Steps: []resource.TestStep{
 				resource.TestStep{
-					Config: spaceResource,
+					Config: spaceQuotaResource,
 				},
 				resource.TestStep{
-					ResourceName:            resourceName,
-					ImportState:             true,
-					ImportStateVerify:       true,
-					ImportStateVerifyIgnore: []string{"staging_asgs", "asgs"},
+					ResourceName:      resourceName,
+					ImportState:       true,
+					ImportStateVerify: true,
 				},
 			},
 		})

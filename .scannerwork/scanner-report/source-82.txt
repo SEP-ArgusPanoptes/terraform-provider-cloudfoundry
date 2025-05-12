@@ -1,26 +1,38 @@
 package v3appdeployers
 
-// BindServiceInstances : bind service instances to application
-func (a Actor) BindServiceInstances(appDeploy AppDeploy, reverse FallbackFunction) Action {
-	return Action{
-		Forward: func(ctx Context) (Context, error) {
-			appResp := ctx["app_response"].(AppDeployResponse)
+import (
+	"time"
 
-			bindings, err := a.runBinder.BindServiceInstances(AppDeploy{
-				App:             appResp.App,
-				ServiceBindings: appDeploy.ServiceBindings,
-				StageTimeout:    appDeploy.StageTimeout,
-				BindTimeout:     appDeploy.BindTimeout,
-				StartTimeout:    appDeploy.StartTimeout,
-			})
-			if err != nil {
-				return ctx, err
-			}
+	"code.cloudfoundry.org/cli/resources"
+	"code.cloudfoundry.org/cli/types"
+)
 
-			appResp.ServiceBindings = bindings
-			ctx["app_response"] = appResp
-			return ctx, nil
-		},
-		ReversePrevious: reverse,
-	}
+type AppDeploy struct {
+	App             resources.Application
+	EnableSSH       types.NullBool
+	AppPackage      resources.Package
+	Process         resources.Process
+	Mappings        []resources.Route
+	ServiceBindings []resources.ServiceCredentialBinding
+	EnvVars         map[string]interface{}
+	Path            string
+	BindTimeout     time.Duration
+	StageTimeout    time.Duration
+	StartTimeout    time.Duration
+	Ports           []int
+}
+
+func (a AppDeploy) IsDockerImage() bool {
+	return a.AppPackage.DockerImage != ""
+}
+
+type AppDeployResponse struct {
+	App             resources.Application
+	EnableSSH       types.NullBool
+	AppPackage      resources.Package
+	Process         resources.Process
+	EnvVars         map[string]interface{}
+	Mappings        []resources.Route
+	ServiceBindings []resources.ServiceCredentialBinding
+	Ports           []int
 }

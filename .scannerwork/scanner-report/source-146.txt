@@ -1,116 +1,106 @@
 package cloudfoundry
 
 import (
-	"context"
-	"github.com/hashicorp/terraform-plugin-sdk/v2/diag"
+	"fmt"
 	"github.com/terraform-providers/terraform-provider-cloudfoundry/cloudfoundry/managers"
+	"testing"
 
-	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/resource"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/terraform"
 )
 
-func resourceServicePlanAccess() *schema.Resource {
-	return &schema.Resource{
-		CreateContext: resourceServicePlanAccessCreate,
-		ReadContext:   resourceServicePlanAccessRead,
-		DeleteContext: resourceServicePlanAccessDelete,
-		Importer: &schema.ResourceImporter{
-			StateContext: resourceServicePlanAccessImport,
-		},
-		Schema: map[string]*schema.Schema{
-			"plan": &schema.Schema{
-				Type:     schema.TypeString,
-				ForceNew: true,
-				Required: true,
+const serviceKeyResource = `
+data "cloudfoundry_service" "test-service" {
+  name = "%s"
+}
+
+resource "cloudfoundry_service_instance" "test-service-instance" {
+	name = "test-service-instance"
+  space = "%s"
+  service_plan = "${data.cloudfoundry_service.test-service.service_plans["%s"]}"
+}
+
+resource "cloudfoundry_service_key" "test-service-instance-key" {
+	name = "test-service-instance-key"
+	service_instance = "${cloudfoundry_service_instance.test-service-instance.id}"
+
+	params = {
+		"key1" = "aaaa"
+		"key2" = "bbbb"
+	}
+}
+`
+
+func TestAccResServiceKey_normal(t *testing.T) {
+
+	spaceId, _ := defaultTestSpace(t)
+	serviceName1, _, servicePlan := getTestServiceBrokers(t)
+
+	ref := "cloudfoundry_service_key.test-service-instance-key"
+
+	resource.Test(t,
+		resource.TestCase{
+			PreCheck:          func() { testAccPreCheck(t) },
+			ProviderFactories: testAccProvidersFactories,
+			CheckDestroy: testAccCheckServiceKeyDestroyed(
+				"test-service-instance-key", ref),
+			Steps: []resource.TestStep{
+
+				resource.TestStep{
+					Config: fmt.Sprintf(serviceKeyResource,
+						serviceName1, spaceId, servicePlan),
+					Check: resource.ComposeTestCheckFunc(
+						testAccCheckServiceKeyExists(ref),
+						resource.TestCheckResourceAttr(
+							ref, "name", "test-service-instance-key"),
+					),
+				},
 			},
-			"org": &schema.Schema{
-				Type:          schema.TypeString,
-				Optional:      true,
-				ForceNew:      true,
-				ConflictsWith: []string{"public"},
-			},
-			"public": &schema.Schema{
-				Type:          schema.TypeBool,
-				Optional:      true,
-				ForceNew:      true,
-				ConflictsWith: []string{"org"},
-			},
-		},
+		})
+}
+
+func testAccCheckServiceKeyExists(resource string) resource.TestCheckFunc {
+
+	return func(s *terraform.State) error {
+
+		session := testAccProvider.Meta().(*managers.Session)
+
+		rs, ok := s.RootModule().Resources[resource]
+		if !ok {
+			return fmt.Errorf("service instance '%s' not found in terraform state", resource)
+		}
+
+		id := rs.Primary.ID
+		attributes := rs.Primary.Attributes
+		serviceKey, _, err := session.ClientV2.GetServiceKey(id)
+		if err != nil {
+			return err
+		}
+
+		if err = assertEquals(attributes, "name", serviceKey.Name); err != nil {
+			return err
+		}
+
+		// normalized := normalizeMap(serviceKey.Credentials, make(map[string]interface{}), "", "_")
+		return assertMapEquals("credentials", attributes, serviceKey.Credentials)
 	}
 }
 
-func resourceServicePlanAccessCreate(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
+func testAccCheckServiceKeyDestroyed(name, serviceInstanceKey string) resource.TestCheckFunc {
 
-	session := meta.(*managers.Session)
-	if session == nil {
-		return diag.Errorf("client is nil")
-	}
+	return func(s *terraform.State) error {
 
-	plan := d.Get("plan").(string)
-	public, hasPublic := d.GetOkExists("public")
-	org, hasOrg := d.GetOk("org")
+		session := testAccProvider.Meta().(*managers.Session)
 
-	var id string
-	if hasOrg {
-		spV, _, err := session.ClientV2.CreateServicePlanVisibility(plan, org.(string))
-		if err != nil {
-			return diag.FromErr(err)
+		rs, ok := s.RootModule().Resources[serviceInstanceKey]
+		if !ok {
+			return fmt.Errorf("service instance '%s' not found in terraform state", serviceInstanceKey)
 		}
-		id = spV.GUID
-	} else {
-		state := false
-		if hasPublic {
-			state = public.(bool)
+
+		_, _, err := session.ClientV2.GetServiceKey(rs.Primary.ID)
+		if err == nil {
+			return fmt.Errorf("service instance with name '%s' still exists in cloud foundry", name)
 		}
-		_, err := session.ClientV2.UpdateServicePlan(plan, state)
-		if err != nil {
-			return diag.FromErr(err)
-		}
-		id = plan
-	}
-
-	d.SetId(id)
-	return nil
-}
-
-func resourceServicePlanAccessRead(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
-	session := meta.(*managers.Session)
-
-	_, hasOrg := d.GetOk("org")
-
-	if hasOrg {
-		spV, _, err := session.ClientV2.GetServicePlanVisibility(d.Id())
-		if err != nil {
-			if IsErrNotFound(err) {
-				d.SetId("")
-				return nil
-			}
-			return diag.FromErr(err)
-		}
-		d.Set("plan", spV.ServicePlanGUID)
-		d.Set("org", spV.OrganizationGUID)
-	} else {
-		plan, _, err := session.ClientV2.GetServicePlan(d.Id())
-		if err != nil {
-			if IsErrNotFound(err) {
-				d.SetId("")
-				return nil
-			}
-			return diag.FromErr(err)
-		}
-		d.Set("plan", d.Id())
-		d.Set("public", plan.Public)
-	}
-
-	return nil
-}
-
-func resourceServicePlanAccessDelete(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
-	session := meta.(*managers.Session)
-
-	_, hasOrg := d.GetOk("org")
-	if !hasOrg {
 		return nil
 	}
-	_, err := session.ClientV2.DeleteServicePlanVisibility(d.Id())
-	return diag.FromErr(err)
 }

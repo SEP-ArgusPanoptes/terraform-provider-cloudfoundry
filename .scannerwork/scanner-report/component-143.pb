@@ -1,1 +1,1 @@
-è 2goX®hr1cloudfoundry/resource_cf_service_instance_test.go
+è 2goX*hr4cloudfoundry/resource_cf_service_instance_migrate.go

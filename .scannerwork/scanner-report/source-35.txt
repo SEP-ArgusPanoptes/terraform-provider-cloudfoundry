@@ -1,70 +1,71 @@
 package cloudfoundry
 
 import (
-	"fmt"
-	"testing"
+	"context"
 
-	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/resource"
-	"github.com/hashicorp/terraform-plugin-sdk/v2/terraform"
+	"code.cloudfoundry.org/cli/api/cloudcontroller/ccv3"
+	"code.cloudfoundry.org/cli/resources"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/diag"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
+	"github.com/terraform-providers/terraform-provider-cloudfoundry/cloudfoundry/managers"
 )
 
-const serviceKeyDataResource = `
+func dataSourceServiceKey() *schema.Resource {
 
-data "cf_org" "org" {
-	name = "%s"
-}
-data "cf_space" "space" {
-	name = "%s"
-	org = "${data.cf_org.org.id}"
-}
+	return &schema.Resource{
 
-data "cf_service" "s1" {
-	name = "%s"
-}
-resource "cf_service_instance" "db" {
-	name = "db-update"
-	space = "${data.cf_space.space.id}"
-	service_plan = "${data.cf_service.s1.service_plans.%s}"
-}
-resource "cf_service_key" "test" {
-	name = "test-key-name"
-	service_instance = "${cf_service_instance.db.id}"
-}
-data "cf_service_key" "test" {
-	name = "${cf_service_key.test.name}"
-	service_instance = "${cf_service_instance.db.id}"
-	depends_on = [ cf_service_key.test ]
-}
-`
+		ReadContext: dataSourceServiceKeyRead,
 
-func TestAccDataSourceServiceKey_normal(t *testing.T) {
+		Schema: map[string]*schema.Schema{
 
-	serviceName1, _, servicePlan := getTestServiceBrokers(t)
-	_, orgName := defaultTestOrg(t)
-	_, spaceName := defaultTestSpace(t)
-
-	ref := "data.cf_service_key.test"
-
-	resource.ParallelTest(t,
-		resource.TestCase{
-			PreCheck:          func() { testAccPreCheck(t) },
-			ProviderFactories: testAccProvidersFactories,
-			Steps: []resource.TestStep{
-
-				resource.TestStep{
-					Config: fmt.Sprintf(serviceKeyDataResource, orgName, spaceName,
-						serviceName1, servicePlan),
-					Check: func(s *terraform.State) error {
-						rs, ok := s.RootModule().Resources[ref]
-						if !ok {
-							return fmt.Errorf("service key '%s' not found in terraform state", ref)
-						}
-						if rs.Primary.Attributes["name"] != "test-key-name" {
-							return fmt.Errorf("service key name is incorrect!")
-						}
-						return nil
-					},
-				},
+			"name": &schema.Schema{
+				Type:     schema.TypeString,
+				Required: true,
 			},
-		})
+			"service_instance": &schema.Schema{
+				Type:     schema.TypeString,
+				Required: true,
+			},
+			"credentials": &schema.Schema{
+				Type:      schema.TypeMap,
+				Computed:  true,
+				Sensitive: true,
+			},
+		},
+	}
+}
+
+func dataSourceServiceKeyRead(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
+	session := meta.(*managers.Session)
+	var serviceKeys []resources.ServiceCredentialBinding
+	var err error
+
+	serviceKeys, _, err = session.ClientV3.GetServiceCredentialBindings(
+		ccv3.Query{
+			Key:    ccv3.QueryKey("service_instance_guids"),
+			Values: []string{d.Get("service_instance").(string)},
+		}, ccv3.Query{
+			Key:    ccv3.NameFilter,
+			Values: []string{d.Get("name").(string)},
+		},
+	)
+
+	if err != nil {
+		return diag.FromErr(err)
+	}
+	if len(serviceKeys) == 0 {
+		return diag.FromErr(NotFound)
+	}
+	serviceKey := serviceKeys[0]
+	serviceKeyDetails, _, err := session.ClientV3.GetServiceCredentialBindingDetails(serviceKey.GUID)
+	if err != nil {
+		return diag.FromErr(err)
+	}
+
+	d.SetId(serviceKey.GUID)
+	d.Set("name", serviceKey.Name)
+	d.Set("service_instance", serviceKey.ServiceInstanceGUID)
+	d.Set("credentials", normalizeMap(serviceKeyDetails.Credentials, make(map[string]interface{}), "", "_"))
+
+	return nil
 }

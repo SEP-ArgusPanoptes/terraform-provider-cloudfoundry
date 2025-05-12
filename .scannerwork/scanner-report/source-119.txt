@@ -1,259 +1,146 @@
 package cloudfoundry
 
 import (
-	"code.cloudfoundry.org/cli/api/cloudcontroller/ccv2"
-	"fmt"
+	"context"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/diag"
 	"github.com/terraform-providers/terraform-provider-cloudfoundry/cloudfoundry/managers"
-	"reflect"
-	"testing"
 
-	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/resource"
-	"github.com/hashicorp/terraform-plugin-sdk/v2/terraform"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
 )
 
-const evgRunningResource = `
+func resourceEvg() *schema.Resource {
 
-resource "cloudfoundry_evg" "running" {
+	return &schema.Resource{
 
-	name = "running"
+		CreateContext: resourceEvgCreate,
+		ReadContext:   resourceEvgRead,
+		UpdateContext: resourceEvgUpdate,
+		DeleteContext: resourceEvgDelete,
 
-    variables = {
-        name1 = "value1"
-        name2 = "value2"
-        name3 = "value3"
-        name4 = "value4"
-    }
-}
-`
+		Importer: &schema.ResourceImporter{
+			StateContext: func(ctx context.Context, d *schema.ResourceData, meta interface{}) ([]*schema.ResourceData, error) {
+				d.Set("name", d.Id())
+				return ImportReadContext(resourceEvgRead)(ctx, d, meta)
+			},
+		},
 
-const evgRunningResourceUpdated = `
-
-resource "cloudfoundry_evg" "running" {
-
-	name = "running"
-
-    variables = {
-        name1 = "value1"
-        name2 = "value2"
-        name3 = "valueC"
-        name4 = "valueD"
-        name5 = "valueE"
-    }
-}
-`
-
-const evgStagingResource = `
-resource "cloudfoundry_evg" "staging" {
-
-	name = "staging"
-
-    variables = {
-        name3 = "value3"
-        name4 = "value4"
-        name5 = "value5"
-    }
-}
-`
-
-const evgStagingResourceUpdated = `
-resource "cloudfoundry_evg" "staging" {
-
-	name = "staging"
-
-    variables = {
-        name4 = "value4"
-        name5 = "valueE"
-    }
-}
-`
-
-var defaultLenStagingEvg int
-var defaultLenRunningEvg int
-var evgCurrentRunning ccv2.EnvVarGroup = nil
-var evgCurrentStaging ccv2.EnvVarGroup = nil
-
-func addEvgToMap(m map[string]string, evg ccv2.EnvVarGroup) map[string]string {
-	for k, v := range evg {
-		m[k] = v
+		Schema: map[string]*schema.Schema{
+			"name": &schema.Schema{
+				Type:         schema.TypeString,
+				Required:     true,
+				ValidateFunc: validateDefaultRunningStagingName,
+			},
+			"variables": &schema.Schema{
+				Type:     schema.TypeMap,
+				Required: true,
+			},
+		},
 	}
-	return m
 }
 
-func loadPreviousEvg() {
+func resourceEvgCreate(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
+
+	if err := resourceEvgUpdate(ctx, d, meta); err != nil {
+		return err
+	}
+	d.SetId(d.Get("name").(string))
+	return nil
+}
+
+func resourceEvgRead(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
+	session := meta.(*managers.Session)
+
+	var variables map[string]string
 	var err error
-	if evgCurrentRunning == nil {
-		evgCurrentRunning, _, err = testSession().ClientV2.GetEnvVarGroupRunning()
-		if err != nil {
-			panic(err)
+	switch d.Get("name").(string) {
+	case AppStatusRunning:
+		variables, _, err = session.ClientV2.GetEnvVarGroupRunning()
+	case AppStatusStaging:
+		variables, _, err = session.ClientV2.GetEnvVarGroupStaging()
+	}
+	if err != nil {
+		return diag.FromErr(err)
+	}
+	finalVariables := make(map[string]interface{})
+	tfVariables := d.Get("variables").(map[string]interface{})
+	for tfKey := range tfVariables {
+		if v, ok := variables[tfKey]; ok {
+			finalVariables[tfKey] = v
 		}
 	}
-	if evgCurrentStaging == nil {
-		defaultLenRunningEvg = len(evgCurrentRunning)
-		evgCurrentStaging, _, err = testSession().ClientV2.GetEnvVarGroupStaging()
-		if err != nil {
-			panic(err)
-		}
-		defaultLenStagingEvg = len(evgCurrentStaging)
-	}
-}
 
-func TestAccRunningEvg_normal(t *testing.T) {
-	loadPreviousEvg()
-
-	ref := "cloudfoundry_evg.running"
-	name := "running"
-
-	resource.ParallelTest(t,
-		resource.TestCase{
-			PreCheck:          func() { testAccPreCheck(t) },
-			ProviderFactories: testAccProvidersFactories,
-			CheckDestroy:      testAccCheckEvgDestroy(name),
-			Steps: []resource.TestStep{
-
-				resource.TestStep{
-					Config: evgRunningResource,
-					Check: resource.ComposeTestCheckFunc(
-						checkEvgExists(ref, addEvgToMap(map[string]string{
-							"name1": "value1",
-							"name2": "value2",
-							"name3": "value3",
-							"name4": "value4",
-						}, evgCurrentRunning)),
-						resource.TestCheckResourceAttr(ref, "name", "running"),
-						resource.TestCheckResourceAttr(ref, "variables.name1", "value1"),
-						resource.TestCheckResourceAttr(ref, "variables.name2", "value2"),
-						resource.TestCheckResourceAttr(ref, "variables.name3", "value3"),
-						resource.TestCheckResourceAttr(ref, "variables.name4", "value4"),
-					),
-				},
-				resource.TestStep{
-					ResourceName:      ref,
-					ImportState:       true,
-					ImportStateVerify: false,
-				},
-				resource.TestStep{
-					Config: evgRunningResourceUpdated,
-					Check: resource.ComposeTestCheckFunc(
-						checkEvgExists(ref, addEvgToMap(map[string]string{
-							"name1": "value1",
-							"name2": "value2",
-							"name3": "valueC",
-							"name4": "valueD",
-							"name5": "valueE",
-						}, evgCurrentRunning)),
-						resource.TestCheckResourceAttr(ref, "name", "running"),
-						resource.TestCheckResourceAttr(ref, "variables.name1", "value1"),
-						resource.TestCheckResourceAttr(ref, "variables.name2", "value2"),
-						resource.TestCheckResourceAttr(ref, "variables.name3", "valueC"),
-						resource.TestCheckResourceAttr(ref, "variables.name4", "valueD"),
-						resource.TestCheckResourceAttr(ref, "variables.name5", "valueE"),
-					),
-				},
-			},
-		})
-}
-
-func TestAccResStagingEvg_normal(t *testing.T) {
-	loadPreviousEvg()
-
-	ref := "cloudfoundry_evg.staging"
-	name := "staging"
-
-	resource.ParallelTest(t,
-		resource.TestCase{
-			PreCheck:          func() { testAccPreCheck(t) },
-			ProviderFactories: testAccProvidersFactories,
-			CheckDestroy:      testAccCheckEvgDestroy(name),
-			Steps: []resource.TestStep{
-
-				resource.TestStep{
-					Config: evgStagingResource,
-					Check: resource.ComposeTestCheckFunc(
-						checkEvgExists(ref, addEvgToMap(map[string]string{
-							"name3": "value3",
-							"name4": "value4",
-							"name5": "value5",
-						}, evgCurrentStaging)),
-						resource.TestCheckResourceAttr(ref, "name", "staging"),
-						resource.TestCheckResourceAttr(ref, "variables.%", "3"),
-						resource.TestCheckResourceAttr(ref, "variables.name3", "value3"),
-						resource.TestCheckResourceAttr(ref, "variables.name4", "value4"),
-						resource.TestCheckResourceAttr(ref, "variables.name5", "value5"),
-					),
-				},
-				resource.TestStep{
-					Config: evgStagingResourceUpdated,
-					Check: resource.ComposeTestCheckFunc(
-						checkEvgExists(ref, addEvgToMap(map[string]string{
-							"name4": "value4",
-							"name5": "valueE",
-						}, evgCurrentStaging)),
-						resource.TestCheckResourceAttr(ref, "name", "staging"),
-						resource.TestCheckResourceAttr(ref, "variables.%", "2"),
-						resource.TestCheckResourceAttr(ref, "variables.name4", "value4"),
-						resource.TestCheckResourceAttr(ref, "variables.name5", "valueE"),
-					),
-				},
-			},
-		})
-}
-
-func checkEvgExists(resource string, wantedEvg map[string]string) resource.TestCheckFunc {
-
-	return func(s *terraform.State) error {
-
-		session := testAccProvider.Meta().(*managers.Session)
-
-		rs, ok := s.RootModule().Resources[resource]
-		if !ok {
-			return fmt.Errorf("asg '%s' not found in terraform state", resource)
-		}
-
-		id := rs.Primary.ID
-
-		var variables map[string]string
-		var err error
-		switch id {
-		case AppStatusRunning:
-			variables, _, err = session.ClientV2.GetEnvVarGroupRunning()
-		case AppStatusStaging:
-			variables, _, err = session.ClientV2.GetEnvVarGroupStaging()
-		}
-		if err != nil {
-			return err
-		}
-		if !reflect.DeepEqual(wantedEvg, variables) {
-			return fmt.Errorf("map with key 'variables' expected to be:\n%# v\nbut was:%# v", wantedEvg, variables)
-		}
-		variablesInterface := make(map[string]interface{})
+	if IsImportState(d) && len(finalVariables) == 0 {
 		for k, v := range variables {
-			variablesInterface[k] = v
+			finalVariables[k] = v
 		}
-		return nil
 	}
+	d.Set("variables", finalVariables)
+	return nil
 }
 
-func testAccCheckEvgDestroy(name string) resource.TestCheckFunc {
+func resourceEvgUpdate(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
 
-	return func(s *terraform.State) error {
-		session := testAccProvider.Meta().(*managers.Session)
-		var variables map[string]string
-		var defaultLen int
-		var err error
-		switch name {
-		case AppStatusRunning:
-			variables, _, err = session.ClientV2.GetEnvVarGroupRunning()
-			defaultLen = defaultLenRunningEvg
-		case AppStatusStaging:
-			variables, _, err = session.ClientV2.GetEnvVarGroupStaging()
-			defaultLen = defaultLenStagingEvg
-		}
-		if err != nil {
-			return err
-		}
-		if len(variables) != defaultLen {
-			return fmt.Errorf("%s variables are not empty", name)
-		}
-		return nil
+	session := meta.(*managers.Session)
+
+	name := d.Get("name").(string)
+	tfVariables := d.Get("variables").(map[string]interface{})
+
+	var variables map[string]string
+	var err error
+	switch name {
+	case AppStatusRunning:
+		variables, _, err = session.ClientV2.GetEnvVarGroupRunning()
+	case AppStatusStaging:
+		variables, _, err = session.ClientV2.GetEnvVarGroupStaging()
 	}
+	if err != nil {
+		return diag.FromErr(err)
+	}
+	old, new := d.GetChange("variables")
+	keyToDelete, keyToAdd := getMapChanges(old, new)
+	for _, key := range keyToAdd {
+		variables[key] = tfVariables[key].(string)
+	}
+	for _, key := range keyToDelete {
+		delete(variables, key)
+	}
+
+	switch name {
+	case AppStatusRunning:
+		_, err = session.ClientV2.SetEnvVarGroupRunning(variables)
+	case AppStatusStaging:
+		_, err = session.ClientV2.SetEnvVarGroupStaging(variables)
+	}
+	if err != nil {
+		return diag.FromErr(err)
+	}
+	return nil
+}
+
+func resourceEvgDelete(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
+	session := meta.(*managers.Session)
+	var variables map[string]string
+	var err error
+	switch d.Get("name").(string) {
+	case AppStatusRunning:
+		variables, _, err = session.ClientV2.GetEnvVarGroupRunning()
+	case AppStatusStaging:
+		variables, _, err = session.ClientV2.GetEnvVarGroupStaging()
+	}
+	if err != nil {
+		return diag.FromErr(err)
+	}
+	for k := range d.Get("variables").(map[string]interface{}) {
+		delete(variables, k)
+	}
+	switch d.Get("name").(string) {
+	case AppStatusRunning:
+		_, err = session.ClientV2.SetEnvVarGroupRunning(variables)
+	case AppStatusStaging:
+		_, err = session.ClientV2.SetEnvVarGroupStaging(variables)
+	}
+	if err != nil {
+		return diag.FromErr(err)
+	}
+	return nil
 }

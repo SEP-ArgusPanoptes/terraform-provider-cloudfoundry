@@ -1,224 +1,279 @@
 package cloudfoundry
 
 import (
+	"bytes"
 	"fmt"
 	"testing"
+	"text/template"
 
-	"code.cloudfoundry.org/cli/api/cloudcontroller/ccv2"
-	"code.cloudfoundry.org/cli/api/cloudcontroller/ccv2/constant"
 	"github.com/terraform-providers/terraform-provider-cloudfoundry/cloudfoundry/managers"
 
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/resource"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/terraform"
 )
 
-const routeResource = `
-
+const routeBindingResourceCommon = `
 data "cloudfoundry_domain" "local" {
-    name = "%s"
+  name = "{{ .Domain }}"
 }
+
 data "cloudfoundry_org" "org" {
-    name = "%s"
+  name = "{{ .Org }}"
 }
+
 data "cloudfoundry_space" "space" {
-    name = "%s"
-	org = "${data.cloudfoundry_org.org.id}"
+  name = "{{ .Space }}"
+  org = "${data.cloudfoundry_org.org.id}"
 }
 
-resource "cloudfoundry_app" "test-app-8080" {
-	name = "test-app"
-	space = "${data.cloudfoundry_space.space.id}"
-	timeout = 1800
-	buildpack = "binary_buildpack"
-	path = "%s"
+resource "cloudfoundry_route" "basic-auth-broker" {
+  domain = "${data.cloudfoundry_domain.local.id}"
+  space = "${data.cloudfoundry_space.space.id}"
+  hostname = "basic-auth-broker"
 }
-resource "cloudfoundry_route" "test-app-route" {
-	domain = "${data.cloudfoundry_domain.local.id}"
-	space = "${data.cloudfoundry_space.space.id}"
-	hostname = "test-app-single"
 
-	target {
-		app = "${cloudfoundry_app.test-app-8080.id}"
-	}
+resource "cloudfoundry_app" "basic-auth-broker" {
+  name = "basic-auth-broker"
+  space = "${data.cloudfoundry_space.space.id}"
+  memory = "128"
+  disk_quota = "256"
+  path = "{{ .BrokerPath }}"
+  buildpack = "binary_buildpack"
+  command = "./servicebroker"
+  routes {
+    route = "${cloudfoundry_route.basic-auth-broker.id}"
+  }
+  environment = {
+    BROKER_CONFIG_PATH = "config.yml"
+	ROUTE_SERVICE_URL = "https://basic-auth-router.{{ .Domain }}"
+  }
+  timeout = 300
+}
+
+resource "cloudfoundry_service_broker" "basic-auth" {
+  depends_on = [ "cloudfoundry_app.basic-auth-broker" ]
+  name = "basic-auth"
+  url = "https://basic-auth-broker.{{ .Domain }}"
+  username = "admin"
+  password = "letmein"
+}
+
+resource "cloudfoundry_service_plan_access" "basic-auth-access" {
+  plan = "${cloudfoundry_service_broker.basic-auth.service_plans["p-basic-auth/reverse-name"]}"
+  public = true
+}
+
+
+resource "cloudfoundry_route" "basic-auth-router" {
+  domain = "${data.cloudfoundry_domain.local.id}"
+  space = "${data.cloudfoundry_space.space.id}"
+  hostname = "basic-auth-router"
+}
+
+resource "cloudfoundry_app" "basic-auth-router" {
+  name = "basic-auth-router"
+  space = "${data.cloudfoundry_space.space.id}"
+  memory = "128"
+  disk_quota = "256"
+  path = "{{ .ServerPath }}"
+  buildpack = "binary_buildpack"
+  command = "./routeserver"
+  routes {
+	route = "${cloudfoundry_route.basic-auth-router.id}"
+  }
+  timeout = 300
+}
+
+resource "cloudfoundry_service_instance" "basic-auth" {
+  depends_on = [ "cloudfoundry_service_plan_access.basic-auth-access" ]
+  name = "basic-auth"
+  space = "${data.cloudfoundry_space.space.id}"
+  service_plan = "${cloudfoundry_service_broker.basic-auth.service_plans["p-basic-auth/reverse-name"]}"
+}
+
+resource "cloudfoundry_route" "dummy-app" {
+  domain = "${data.cloudfoundry_domain.local.id}"
+  space = "${data.cloudfoundry_space.space.id}"
+  hostname = "dummy-app"
+}
+
+resource "cloudfoundry_app" "dummy-app" {
+  name = "dummy-app"
+  buildpack = "binary_buildpack"
+  space = "${data.cloudfoundry_space.space.id}"
+  memory = "128"
+  disk_quota = "256"
+  path = "{{ .DummyAppPath }}"
+  routes {
+    route = "${cloudfoundry_route.dummy-app.id}"
+  }
+  timeout = 300
 }
 `
 
-const routeResourceUpdate = `
-
-data "cloudfoundry_domain" "local" {
-    name = "%s"
-}
-data "cloudfoundry_org" "org" {
-    name = "%s"
-}
-data "cloudfoundry_space" "space" {
-    name = "%s"
-	org = "${data.cloudfoundry_org.org.id}"
-}
-
-resource "cloudfoundry_app" "test-app-8080" {
-	name = "test-app-8080"
-	space = "${data.cloudfoundry_space.space.id}"
-	timeout = 1800
-	buildpack = "binary_buildpack"
-	path = "%s"
-}
-resource "cloudfoundry_app" "test-app-8888" {
-	name = "test-app-8888"
-	space = "${data.cloudfoundry_space.space.id}"
-	ports = [ 8888 ]
-	timeout = 1800
-	buildpack = "binary_buildpack"
-	path = "%s"
-}
-resource "cloudfoundry_app" "test-app-9999" {
-	name = "test-app-9999"
-	space = "${data.cloudfoundry_space.space.id}"
-	ports = [ 9999 ]
-	timeout = 1800
-	buildpack = "binary_buildpack"
-	path = "%s"
-}
-resource "cloudfoundry_route" "test-app-route" {
-	domain = "${data.cloudfoundry_domain.local.id}"
-	space = "${data.cloudfoundry_space.space.id}"
-	hostname = "test-app-multi"
-
-	target {
-		app = "${cloudfoundry_app.test-app-9999.id}"
-		port = 9999
-	}
-	target {
-		app = "${cloudfoundry_app.test-app-8888.id}"
-		port = 8888
-	}
-	target {
-		app = "${cloudfoundry_app.test-app-8080.id}"
-	}
+const routeBindingResourceCreate = `
+resource "cloudfoundry_route_service_binding" "route-bind" {
+  service_instance = "${cloudfoundry_service_instance.basic-auth.id}"
+  route = "${cloudfoundry_route.dummy-app.id}"
 }
 `
 
-func TestAccResRoute_normal(t *testing.T) {
+const routeBindingResourceUpdate = `
+resource "cloudfoundry_route" "dummy-app-other" {
+  domain = "${data.cloudfoundry_domain.local.id}"
+  space = "${data.cloudfoundry_space.space.id}"
+  hostname = "dummy-app-other"
+}
 
+resource "cloudfoundry_route_service_binding" "route-bind" {
+  service_instance = "${cloudfoundry_service_instance.basic-auth.id}"
+  route = "${cloudfoundry_route.dummy-app-other.id}"
+}
+`
+
+const routeBindingResourceDelete = `
+resource "cloudfoundry_route" "dummy-app-other" {
+  domain = "${data.cloudfoundry_domain.local.id}"
+  space = "${data.cloudfoundry_space.space.id}"
+  hostname = "dummy-app-other"
+}
+`
+
+func TestAccResRouteServiceBinding_normal(t *testing.T) {
 	_, orgName := defaultTestOrg(t)
 	_, spaceName := defaultTestSpace(t)
 
-	refRoute := "cloudfoundry_route.test-app-route"
+	ref := "cloudfoundry_route_service_binding.route-bind"
+	tpl, _ := template.New("sql").Parse(routeBindingResourceCommon)
+	buf := &bytes.Buffer{}
+	err := tpl.Execute(buf, map[string]interface{}{
+		"Domain":       defaultAppDomain(),
+		"Org":          orgName,
+		"Space":        spaceName,
+		"BaseDir":      defaultBaseDir(),
+		"BrokerPath":   asset("route-service-broker.zip"),
+		"ServerPath":   asset("route-service-server.zip"),
+		"DummyAppPath": asset("dummy-app.zip"),
+	})
+	if err != nil {
+		t.Fatal(err.Error())
+	}
+	appURL := fmt.Sprintf("https://dummy-app.%s", defaultAppDomain())
 
 	resource.Test(t,
 		resource.TestCase{
 			PreCheck:          func() { testAccPreCheck(t) },
 			ProviderFactories: testAccProvidersFactories,
-			CheckDestroy:      testAccCheckRouteDestroyed([]string{"test-app-single", "test-app-multi"}, defaultAppDomain()),
 			Steps: []resource.TestStep{
-
 				resource.TestStep{
-					Config: fmt.Sprintf(routeResource,
-						defaultAppDomain(),
-						orgName, spaceName,
-						appPath),
+					Config: buf.String() + routeBindingResourceCreate,
 					Check: resource.ComposeTestCheckFunc(
-						testAccCheckRouteExists(refRoute, func() (err error) {
-							if err = assertHTTPResponse("https://test-app-single."+defaultAppDomain(), 200, nil); err != nil {
-								return err
-							}
-							return
-						}),
-						resource.TestCheckResourceAttr(
-							refRoute, "hostname", "test-app-single"),
-						resource.TestCheckResourceAttr(
-							refRoute, "target.#", "1"),
+						checkRouteServiceBindingResource(ref, "cloudfoundry_service_instance.basic-auth", "cloudfoundry_route.dummy-app"),
+						checkRouteServiceBinding("cloudfoundry_service_instance.basic-auth", "cloudfoundry_route.dummy-app", true),
+						checkAppResponse(appURL, 401),
 					),
 				},
-
 				resource.TestStep{
-					Config: fmt.Sprintf(routeResourceUpdate,
-						defaultAppDomain(),
-						orgName, spaceName,
-						appPath, appPath, appPath),
+					Config: buf.String() + routeBindingResourceUpdate,
 					Check: resource.ComposeTestCheckFunc(
-						testAccCheckRouteExists(refRoute, func() (err error) {
-
-							for i := 1; i <= 9; i++ {
-								if err = assertHTTPResponse("https://test-app-multi."+defaultAppDomain(), 200, nil); err != nil {
-									return err
-								}
-							}
-							return
-						}),
-						resource.TestCheckResourceAttr(
-							refRoute, "hostname", "test-app-multi"),
-						resource.TestCheckResourceAttr(
-							refRoute, "target.#", "3"),
+						checkRouteServiceBindingResource(ref, "cloudfoundry_service_instance.basic-auth", "cloudfoundry_route.dummy-app-other"),
+						checkRouteServiceBinding("cloudfoundry_service_instance.basic-auth", "cloudfoundry_route.dummy-app", false),
+						checkRouteServiceBinding("cloudfoundry_service_instance.basic-auth", "cloudfoundry_route.dummy-app-other", true),
+						checkAppResponse(appURL, 200),
+					),
+				},
+				resource.TestStep{
+					Config: buf.String() + routeBindingResourceDelete,
+					Check: resource.ComposeTestCheckFunc(
+						checkRouteServiceBinding("cloudfoundry_service_instance.basic-auth", "cloudfoundry_route.dummy-app", false),
+						checkRouteServiceBinding("cloudfoundry_service_instance.basic-auth", "cloudfoundry_route.dummy-app-other", false),
+						checkAppResponse(appURL, 200),
 					),
 				},
 			},
 		})
 }
 
-func testAccCheckRouteExists(resRoute string, validate func() error) resource.TestCheckFunc {
-
+func checkAppResponse(url string, code int) resource.TestCheckFunc {
 	return func(s *terraform.State) error {
-
-		session := testAccProvider.Meta().(*managers.Session)
-
-		rs, ok := s.RootModule().Resources[resRoute]
-		if !ok {
-			return fmt.Errorf("route '%s' not found in terraform state", resRoute)
-		}
-
-		id := rs.Primary.ID
-		attributes := rs.Primary.Attributes
-
-		route, _, err := session.ClientV2.GetRoute(id)
+		resp, err := testSession().HttpClient.Get(url)
 		if err != nil {
 			return err
 		}
-
-		if err = assertEquals(attributes, "domain", route.DomainGUID); err != nil {
-			return err
+		defer resp.Body.Close()
+		if resp.StatusCode != code {
+			// on cf without valid certif it has 502 error
+			if resp.StatusCode == 502 {
+				fmt.Printf("Warning, looks like is in self signed router ssl env so let's pass 502 instead of %d\n", code)
+				return nil
+			}
+			return fmt.Errorf("invalid status code '%d', expected '%d'", resp.StatusCode, code)
 		}
-		if err = assertEquals(attributes, "space", route.SpaceGUID); err != nil {
-			return err
-		}
-		if err = assertEquals(attributes, "hostname", route.Host); err != nil {
-			return err
-		}
-		if err = assertEquals(attributes, "port", route.Port); err != nil {
-			return err
-		}
-		if err = assertEquals(attributes, "path", route.Path); err != nil {
-			return err
-		}
-
-		return validate()
+		return nil
 	}
 }
 
-func testAccCheckRouteDestroyed(hostnames []string, domain string) resource.TestCheckFunc {
-
+func checkRouteServiceBinding(serviceName, routeName string, exists bool) resource.TestCheckFunc {
 	return func(s *terraform.State) error {
 		session := testAccProvider.Meta().(*managers.Session)
-		domains, _, err := session.ClientV2.GetSharedDomains(ccv2.FilterByName(domain))
-		if err != nil || len(domains) == 0 {
-			domains, _, err = session.ClientV2.GetPrivateDomains(ccv2.FilterByName(domain))
-			if err != nil {
-				return err
+		service, okService := s.RootModule().Resources[serviceName]
+		route, okRoute := s.RootModule().Resources[routeName]
+
+		if !okService {
+			return fmt.Errorf("service '%s' not found in terraform state", serviceName)
+		}
+		if !okRoute {
+			return fmt.Errorf("route '%s' not found in terraform state", routeName)
+		}
+		serviceID := service.Primary.ID
+		routeID := route.Primary.ID
+		routes, _, err := session.ClientV2.GetServiceBindingRoutes(serviceID)
+		if err != nil {
+			return err
+		}
+		found := false
+		for _, route := range routes {
+			if route.GUID == routeID {
+				found = true
+				break
 			}
 		}
-		if len(domains) == 0 {
-			return fmt.Errorf("Domain %s not found", domain)
+		if !found && exists {
+			return fmt.Errorf("unable to find route '%s(%s)' binding to service '%s(%s)'", serviceName, serviceID, routeName, routeID)
 		}
-		domainGuid := domains[0].GUID
-		for _, h := range hostnames {
-			routes, _, err := session.ClientV2.GetRoutes(ccv2.FilterEqual(constant.HostFilter, h), ccv2.FilterEqual(constant.DomainGUIDFilter, domainGuid))
-			if err != nil {
-				return err
-			}
-			if len(routes) > 0 {
-				return fmt.Errorf("route with hostname '%s' and domain '%s' still exists in cloud foundry", h, domain)
-			}
+
+		if found && !exists {
+			return fmt.Errorf("route '%s(%s)' binding to service '%s(%s)' not deleted as it ought to be", serviceName, serviceID, routeName, routeID)
 		}
+
+		return nil
+	}
+}
+
+func checkRouteServiceBindingResource(resource, serviceName, routeName string) resource.TestCheckFunc {
+	return func(s *terraform.State) error {
+		service, okService := s.RootModule().Resources[serviceName]
+		route, okRoute := s.RootModule().Resources[routeName]
+
+		if !okService {
+			return fmt.Errorf("service '%s' not found in terraform state", serviceName)
+		}
+		if !okRoute {
+			return fmt.Errorf("route '%s' not found in terraform state", routeName)
+		}
+		serviceID := service.Primary.ID
+		routeID := route.Primary.ID
+
+		rs, ok := s.RootModule().Resources[resource]
+		if !ok {
+			return fmt.Errorf("route_service_binding '%s' not found in terraform state", resource)
+		}
+
+		id := rs.Primary.ID
+		if id != fmt.Sprintf("%s/%s", serviceID, routeID) {
+			return fmt.Errorf("unexpected route_service_binding resource identifier '%s' mismatch with '%s/%s'", id, serviceID, routeID)
+		}
+
 		return nil
 	}
 }

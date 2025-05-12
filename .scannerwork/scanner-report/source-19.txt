@@ -1,121 +1,63 @@
 package cloudfoundry
 
 import (
-	"context"
-	"strings"
-
-	"github.com/hashicorp/terraform-plugin-sdk/v2/diag"
+	"fmt"
 	"github.com/terraform-providers/terraform-provider-cloudfoundry/cloudfoundry/managers"
+	"testing"
 
-	"code.cloudfoundry.org/cli/resources"
-	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/resource"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/terraform"
 )
 
-func dataSourceDomain() *schema.Resource {
+const asgDataResource = `
 
-	return &schema.Resource{
+data "cloudfoundry_asg" "public" {
+    name = "%s"
+}
+`
 
-		ReadContext: dataSourceDomainRead,
+func TestAccDataSourceAsg_normal(t *testing.T) {
 
-		Schema: map[string]*schema.Schema{
+	defaultAsg := getTestSecurityGroup()
+	ref := "data.cloudfoundry_asg.public"
 
-			"name": &schema.Schema{
-				Type:     schema.TypeString,
-				Optional: true,
-				Computed: true,
+	resource.ParallelTest(t,
+		resource.TestCase{
+			PreCheck:          func() { testAccPreCheck(t) },
+			ProviderFactories: testAccProvidersFactories,
+			Steps: []resource.TestStep{
+
+				resource.TestStep{
+					Config: fmt.Sprintf(asgDataResource, defaultAsg),
+					Check: resource.ComposeTestCheckFunc(
+						checkDataSourceAsgExists(ref),
+						resource.TestCheckResourceAttr(
+							ref, "name", defaultAsg),
+					),
+				},
 			},
-			"sub_domain": &schema.Schema{
-				Type:          schema.TypeString,
-				Optional:      true,
-				ConflictsWith: []string{"name"},
-			},
-			"domain": &schema.Schema{
-				Type:          schema.TypeString,
-				Optional:      true,
-				Computed:      true,
-				ConflictsWith: []string{"name"},
-			},
-			"org": &schema.Schema{
-				Type:     schema.TypeString,
-				Computed: true,
-			},
-			"internal": &schema.Schema{
-				Type:     schema.TypeBool,
-				Computed: true,
-			},
-		},
-	}
+		})
 }
 
-func dataSourceDomainRead(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
+func checkDataSourceAsgExists(resource string) resource.TestCheckFunc {
 
-	session := meta.(*managers.Session)
-	if session == nil {
-		return diag.Errorf("client is nil")
+	return func(s *terraform.State) error {
+
+		session := testAccProvider.Meta().(*managers.Session)
+
+		rs, ok := s.RootModule().Resources[resource]
+		if !ok {
+			return fmt.Errorf("asg '%s' not found in terraform state", resource)
+		}
+
+		id := rs.Primary.ID
+		attributes := rs.Primary.Attributes
+
+		asg, _, err := session.ClientV2.GetSecurityGroup(id)
+		if err != nil {
+			return err
+		}
+		err = assertEquals(attributes, "name", asg.Name)
+		return err
 	}
-
-	dm := session.ClientV3
-
-	var (
-		name, prefix string
-	)
-
-	/* 	sharedDomains, _, err := dm.GetSharedDomains()
-	   	if err != nil {
-	   		return diag.FromErr(err)
-	   	}
-	   	privateDomains, _, err := dm.GetPrivateDomains()
-	   	if err != nil {
-	   		return diag.FromErr(err)
-	   	} */
-
-	domains, _, err := dm.GetDomains()
-
-	if err != nil {
-		return diag.FromErr(err)
-	}
-
-	if v, ok := d.GetOk("sub_domain"); ok {
-		prefix = v.(string) + "."
-		if v, ok = d.GetOk("domain"); ok {
-			name = prefix + v.(string)
-		}
-	} else if v, ok := d.GetOk("name"); ok {
-		name = v.(string)
-	} else {
-		return diag.Errorf("neither a full name or sub-domain was provided to do an effective domain search")
-	}
-
-	var domain *resources.Domain
-	if len(name) == 0 {
-		for _, d := range domains {
-			if strings.HasPrefix(d.Name, prefix) {
-				domain = &d
-				break
-			}
-		}
-		if domain == nil {
-			return diag.Errorf("no domain found with sub-domain '%s'", prefix)
-		}
-	} else {
-		for _, d := range domains {
-			if name == d.Name {
-				domain = &d
-				break
-			}
-		}
-		if domain == nil {
-			return diag.Errorf("no domain found with name '%s'", name)
-		}
-	}
-
-	domainParts := strings.Split(domain.Name, ".")
-
-	d.Set("name", domain.Name)
-	d.Set("sub_domain", domainParts[0])
-	d.Set("domain", strings.Join(domainParts[1:], "."))
-	d.Set("org", domain.OrganizationGUID)
-	d.Set("internal", domain.Internal.Value)
-	d.SetId(domain.GUID)
-	return diag.FromErr(err)
 }

@@ -1,84 +1,200 @@
 package cloudfoundry
 
 import (
-	"context"
-	"github.com/hashicorp/terraform-plugin-sdk/v2/diag"
-	"github.com/terraform-providers/terraform-provider-cloudfoundry/cloudfoundry/managers"
+	"fmt"
+	"testing"
 
-	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
+	"code.cloudfoundry.org/cli/api/cloudcontroller/ccv2"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/resource"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/terraform"
+	"github.com/terraform-providers/terraform-provider-cloudfoundry/cloudfoundry/managers"
 )
 
-func resourcePrivateDomainAccess() *schema.Resource {
-	return &schema.Resource{
-		CreateContext: resourcePrivateDomainAccessCreate,
-		ReadContext:   resourcePrivateDomainAccessRead,
-		DeleteContext: resourcePrivateDomainAccessDelete,
-		Importer: &schema.ResourceImporter{
-			StateContext: ImportReadContext(resourcePrivateDomainAccessRead),
-		},
-
-		Schema: map[string]*schema.Schema{
-			"domain": &schema.Schema{
-				Type:     schema.TypeString,
-				Required: true,
-				ForceNew: true,
-			},
-			"org": &schema.Schema{
-				Type:     schema.TypeString,
-				Required: true,
-				ForceNew: true,
-			},
-		},
-	}
+const orgUsersResource = `
+resource "cloudfoundry_user" "tl" {
+	name = "teamlead@acme.com"
+	password = "password"
+}
+resource "cloudfoundry_user" "dev1" {
+    name = "developer1@acme.com"
+	password = "password"
+}
+resource "cloudfoundry_user" "dev2" {
+    name = "developer2@acme.com"
+	password = "password"
+}
+resource "cloudfoundry_user" "dev3" {
+    name = "developer3@acme.com"
+	password = "password"
+}
+resource "cloudfoundry_user" "adr" {
+    name = "auditor@acme.com"
+	password = "password"
 }
 
-func resourcePrivateDomainAccessCreate(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
-	session := meta.(*managers.Session)
-	domain := d.Get("domain").(string)
-	org := d.Get("org").(string)
-	_, err := session.ClientV2.SetOrganizationPrivateDomain(domain, org)
-	if err != nil {
-		return diag.FromErr(err)
-	}
+resource "cloudfoundry_org_users" "org_users1" {
+	org = "%s"
+    managers = [
+        "${cloudfoundry_user.tl.id}"
+    ]
+    billing_managers = [
+        "${cloudfoundry_user.tl.id}",
+        "${cloudfoundry_user.dev1.id}",
+		"${cloudfoundry_user.dev2.id}"
+    ]
+    auditors = [
+        "${cloudfoundry_user.adr.id}",
+		"${cloudfoundry_user.dev3.id}",
+        "username@acme.com"
+    ]
+}
+`
 
-	d.SetId(computeID(org, domain))
-	return nil
+const orgUsersResourceUpdate = `
+resource "cloudfoundry_user" "dev1" {
+    name = "developer1@acme.com"
+	password = "password"
 }
 
-func resourcePrivateDomainAccessRead(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
-	session := meta.(*managers.Session)
+resource "cloudfoundry_org_users" "org_users1" {
+	org = "%s"
+	managers = []
+    billing_managers = [
+        "${cloudfoundry_user.dev1.id}",
+    ]
+	auditors = []
+}
+`
 
-	id := d.Id()
-	// id in read hook comes from create or import callback which ensure id's validity
-	orgGuid, domainGuid, _ := parseID(id)
+const orgUsersResourceForce = `
+resource "cloudfoundry_user" "dev1" {
+    name = "developer1@acme.com"
+	password = "password"
+}
 
-	found := false
-	domains, _, err := session.ClientV2.GetOrganizationPrivateDomains(orgGuid)
+resource "cloudfoundry_org_users" "org_users1" {
+	org = "%s"
+    billing_managers = [
+        "${cloudfoundry_user.dev1.id}",
+    ]
+	force = true
+}
+`
+
+func TestAccResOrgUsers_normal(t *testing.T) {
+	ref := "cloudfoundry_org_users.org_users1"
+	orgId, _ := defaultTestOrg(t)
+	usersMap := make(map[string][]ccv2.User)
+
+	sessions := testSession()
+	user, err := sessions.ClientUAA.CreateUser("username@acme.com", "paasw0rd", "uaa")
 	if err != nil {
-		return diag.FromErr(err)
+		t.Fatal(err.Error())
 	}
-	for _, domain := range domains {
-		if domain.GUID == domainGuid {
-			found = true
-			break
+	defer func() {
+		_ = sessions.ClientUAA.DeleteUser(user.ID)
+	}()
+	err = addOrNothingUserInOrgBySpace(sessions, orgId, user.ID, false)
+	if err != nil {
+		t.Fatal(err.Error())
+	}
+
+	resource.Test(t,
+		resource.TestCase{
+			PreCheck:          func() { testAccPreCheck(t) },
+			ProviderFactories: testAccProvidersFactories,
+			Steps: []resource.TestStep{
+				{
+					Config: fmt.Sprintf(orgUsersResource, orgId),
+					Check: resource.ComposeTestCheckFunc(
+						testAccCheckOrgUsersExists(ref, &usersMap),
+						resource.TestCheckResourceAttr(
+							ref, "managers.#", "1"),
+						resource.TestCheckResourceAttr(
+							ref, "billing_managers.#", "3"),
+						resource.TestCheckResourceAttr(
+							ref, "auditors.#", "3"),
+					),
+				},
+
+				{
+					Config: fmt.Sprintf(orgUsersResourceUpdate, orgId),
+					Check: resource.ComposeTestCheckFunc(
+						testAccCheckOrgUsersExists(ref, &usersMap),
+						testAccCheckMapUserInside("developer1@acme.com", "billing_managers", &usersMap),
+						resource.TestCheckResourceAttr(
+							ref, "managers.#", "0"),
+						resource.TestCheckResourceAttr(
+							ref, "billing_managers.#", "1"),
+						resource.TestCheckResourceAttr(
+							ref, "auditors.#", "0"),
+					),
+				},
+			},
+		})
+}
+
+func TestAccResOrgUsers_force(t *testing.T) {
+	ref := "cloudfoundry_org_users.org_users1"
+	orgId, _ := defaultTestOrg(t)
+	usersMap := make(map[string][]ccv2.User)
+
+	sessions := testSession()
+	user, err := sessions.ClientUAA.CreateUser("test-acc-force@acme.com", "paasw0rd", "uaa")
+	if err != nil {
+		t.Fatal(err.Error())
+	}
+	defer func() {
+		_ = sessions.ClientUAA.DeleteUser(user.ID)
+	}()
+
+	_, err = sessions.ClientV2.UpdateOrganizationManager(orgId, user.ID)
+	if err != nil {
+		t.Fatal(err.Error())
+	}
+
+	resource.Test(t,
+		resource.TestCase{
+			PreCheck:          func() { testAccPreCheck(t) },
+			ProviderFactories: testAccProvidersFactories,
+			Steps: []resource.TestStep{
+				{
+					Config: fmt.Sprintf(orgUsersResourceForce, orgId),
+					Check: resource.ComposeTestCheckFunc(
+						testAccCheckOrgUsersExists(ref, &usersMap),
+						testAccCheckMapUsersNumber(1, &usersMap),
+						testAccCheckMapUserInside("developer1@acme.com", "billing_managers", &usersMap),
+						resource.TestCheckResourceAttr(
+							ref, "billing_managers.#", "1"),
+					),
+				},
+			},
+		})
+}
+
+func testAccCheckOrgUsersExists(resource string, users *map[string][]ccv2.User) resource.TestCheckFunc {
+	return func(s *terraform.State) error {
+		session := testAccProvider.Meta().(*managers.Session)
+
+		rs, ok := s.RootModule().Resources[resource]
+		if !ok {
+			return fmt.Errorf("Not found: %s", resource)
 		}
-	}
-	if !found {
-		d.SetId("")
+		attributes := rs.Primary.Attributes
+
+		sm := session.ClientV2
+		usersMap := make(map[string][]ccv2.User)
+		for t, r := range orgRoleMap {
+			users, _, err := sm.GetOrganizationUsersByRole(r, attributes["org"])
+			if err != nil {
+				return err
+			}
+			usersMap[t] = users
+		}
+		if len(usersMap) == 0 {
+			return fmt.Errorf("No org users found")
+		}
+		*users = usersMap
 		return nil
 	}
-
-	d.Set("org", orgGuid)
-	d.Set("domain", domainGuid)
-	return nil
-}
-
-func resourcePrivateDomainAccessDelete(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
-	session := meta.(*managers.Session)
-
-	id := d.Id()
-
-	org, domain, _ := parseID(id)
-	_, err := session.ClientV2.DeleteOrganizationPrivateDomain(org, domain)
-	return diag.FromErr(err)
 }

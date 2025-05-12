@@ -1,106 +1,245 @@
 package cloudfoundry
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
-	"github.com/terraform-providers/terraform-provider-cloudfoundry/cloudfoundry/managers"
-	"testing"
+	"log"
+	"time"
 
-	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/resource"
-	"github.com/hashicorp/terraform-plugin-sdk/v2/terraform"
+	"code.cloudfoundry.org/cli/api/cloudcontroller/ccv3"
+	"code.cloudfoundry.org/cli/api/cloudcontroller/ccv3/constant"
+	"code.cloudfoundry.org/cli/resources"
+	"code.cloudfoundry.org/cli/types"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/diag"
+
+	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/validation"
+	"github.com/terraform-providers/terraform-provider-cloudfoundry/cloudfoundry/common"
+	"github.com/terraform-providers/terraform-provider-cloudfoundry/cloudfoundry/managers"
 )
 
-const serviceKeyResource = `
-data "cloudfoundry_service" "test-service" {
-  name = "%s"
-}
+func resourceServiceKey() *schema.Resource {
 
-resource "cloudfoundry_service_instance" "test-service-instance" {
-	name = "test-service-instance"
-  space = "%s"
-  service_plan = "${data.cloudfoundry_service.test-service.service_plans["%s"]}"
-}
+	return &schema.Resource{
 
-resource "cloudfoundry_service_key" "test-service-instance-key" {
-	name = "test-service-instance-key"
-	service_instance = "${cloudfoundry_service_instance.test-service-instance.id}"
+		CreateContext: resourceServiceKeyCreate,
+		ReadContext:   resourceServiceKeyRead,
+		DeleteContext: resourceServiceKeyDelete,
 
-	params = {
-		"key1" = "aaaa"
-		"key2" = "bbbb"
-	}
-}
-`
+		Importer: &schema.ResourceImporter{
+			StateContext: ImportReadContext(resourceServiceKeyRead),
+		},
 
-func TestAccResServiceKey_normal(t *testing.T) {
+		Schema: map[string]*schema.Schema{
 
-	spaceId, _ := defaultTestSpace(t)
-	serviceName1, _, servicePlan := getTestServiceBrokers(t)
-
-	ref := "cloudfoundry_service_key.test-service-instance-key"
-
-	resource.Test(t,
-		resource.TestCase{
-			PreCheck:          func() { testAccPreCheck(t) },
-			ProviderFactories: testAccProvidersFactories,
-			CheckDestroy: testAccCheckServiceKeyDestroyed(
-				"test-service-instance-key", ref),
-			Steps: []resource.TestStep{
-
-				resource.TestStep{
-					Config: fmt.Sprintf(serviceKeyResource,
-						serviceName1, spaceId, servicePlan),
-					Check: resource.ComposeTestCheckFunc(
-						testAccCheckServiceKeyExists(ref),
-						resource.TestCheckResourceAttr(
-							ref, "name", "test-service-instance-key"),
-					),
-				},
+			"name": &schema.Schema{
+				Type:     schema.TypeString,
+				Required: true,
+				ForceNew: true,
 			},
-		})
-}
-
-func testAccCheckServiceKeyExists(resource string) resource.TestCheckFunc {
-
-	return func(s *terraform.State) error {
-
-		session := testAccProvider.Meta().(*managers.Session)
-
-		rs, ok := s.RootModule().Resources[resource]
-		if !ok {
-			return fmt.Errorf("service instance '%s' not found in terraform state", resource)
-		}
-
-		id := rs.Primary.ID
-		attributes := rs.Primary.Attributes
-		serviceKey, _, err := session.ClientV2.GetServiceKey(id)
-		if err != nil {
-			return err
-		}
-
-		if err = assertEquals(attributes, "name", serviceKey.Name); err != nil {
-			return err
-		}
-
-		// normalized := normalizeMap(serviceKey.Credentials, make(map[string]interface{}), "", "_")
-		return assertMapEquals("credentials", attributes, serviceKey.Credentials)
+			"service_instance": &schema.Schema{
+				Type:     schema.TypeString,
+				Required: true,
+				ForceNew: true,
+			},
+			"params": &schema.Schema{
+				Type:          schema.TypeMap,
+				Optional:      true,
+				ForceNew:      true,
+				Sensitive:     true,
+				ConflictsWith: []string{"params_json"},
+			},
+			"params_json": &schema.Schema{
+				Type:          schema.TypeString,
+				Optional:      true,
+				ForceNew:      true,
+				Sensitive:     true,
+				ConflictsWith: []string{"params"},
+				ValidateFunc:  validation.StringIsJSON,
+			},
+			"credentials": &schema.Schema{
+				Type:      schema.TypeMap,
+				Computed:  true,
+				Sensitive: true,
+			},
+		},
 	}
 }
 
-func testAccCheckServiceKeyDestroyed(name, serviceInstanceKey string) resource.TestCheckFunc {
+func resourceServiceKeyCreate(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
+	session := meta.(*managers.Session)
 
-	return func(s *terraform.State) error {
+	name := d.Get("name").(string)
+	serviceInstance := d.Get("service_instance").(string)
+	params := d.Get("params").(map[string]interface{})
+	paramJson := d.Get("params_json").(string)
+	if len(params) == 0 && paramJson != "" {
+		err := json.Unmarshal([]byte(paramJson), &params)
+		if err != nil {
+			return diag.FromErr(err)
+		}
+	}
 
-		session := testAccProvider.Meta().(*managers.Session)
+	binding := resources.ServiceCredentialBinding{
+		ServiceInstanceGUID: serviceInstance,
+		Name:                name,
+		Parameters:          types.NewOptionalObject(params),
+		Type:                resources.ServiceCredentialBindingType("key"),
+	}
 
-		rs, ok := s.RootModule().Resources[serviceInstanceKey]
-		if !ok {
-			return fmt.Errorf("service instance '%s' not found in terraform state", serviceInstanceKey)
+	jobURL, _, err := session.ClientV3.CreateServiceCredentialBinding(binding)
+	if err != nil {
+		return diag.FromErr(err)
+	}
+
+	var serviceKey resources.ServiceCredentialBinding
+
+	// Poll the state of the async job
+	err = common.PollingWithTimeout(func() (bool, error) {
+		job, _, err := session.ClientV3.GetJob(jobURL)
+		if err != nil {
+			return true, err
 		}
 
-		_, _, err := session.ClientV2.GetServiceKey(rs.Primary.ID)
-		if err == nil {
-			return fmt.Errorf("service instance with name '%s' still exists in cloud foundry", name)
+		// Stop polling and return error if job failed
+		if job.State == constant.JobFailed {
+			return true, fmt.Errorf(
+				"ServiceKey creation failed for key %s, reason: %+v",
+				serviceInstance,
+				job.Errors(),
+			)
 		}
+
+		// Check binding state if job completed
+		if job.State == constant.JobComplete {
+			createdKeys, _, err := session.ClientV3.GetServiceCredentialBindings(
+				ccv3.Query{
+					Key:    ccv3.QueryKey("service_instance_guids"),
+					Values: []string{binding.ServiceInstanceGUID},
+				}, ccv3.Query{
+					Key:    ccv3.NameFilter,
+					Values: []string{name},
+				},
+			)
+			if err != nil {
+				return true, err
+			}
+
+			if len(createdKeys) == 0 {
+				return false, nil
+			}
+
+			if createdKeys[0].LastOperation.State == resources.OperationSucceeded {
+				serviceKey = createdKeys[0]
+				return true, nil
+			}
+
+			if createdKeys[0].LastOperation.State == resources.OperationFailed {
+				return true, fmt.Errorf(
+					"Service key creation failed for key %s, reason: %+v",
+					serviceInstance,
+					job.Errors(),
+				)
+			}
+		}
+
+		// Last operation initial or inprogress or job not completed, continue polling
+		return false, nil
+	}, 5*time.Second, 60*time.Second)
+	if err != nil {
+		return diag.FromErr(err)
+	}
+
+	credentials, _, err := session.ClientV3.GetServiceCredentialBindingDetails(serviceKey.GUID)
+	if err != nil {
+		return diag.FromErr(err)
+	}
+	d.Set("credentials", normalizeMap(credentials.Credentials, make(map[string]interface{}), "", "_"))
+	d.SetId(serviceKey.GUID)
+	return nil
+}
+
+func resourceServiceKeyRead(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
+	session := meta.(*managers.Session)
+	var serviceKeys []resources.ServiceCredentialBinding
+	var err error
+	if d.Id() != "" {
+		serviceKeys, _, err = session.ClientV3.GetServiceCredentialBindings(
+			ccv3.Query{
+				Key:    ccv3.GUIDFilter,
+				Values: []string{d.Id()},
+			},
+		)
+	} else {
+		serviceKeys, _, err = session.ClientV3.GetServiceCredentialBindings(
+			ccv3.Query{
+				Key:    ccv3.QueryKey("service_instance_guids"),
+				Values: []string{d.Get("service_instance").(string)},
+			}, ccv3.Query{
+				Key:    ccv3.NameFilter,
+				Values: []string{d.Get("name").(string)},
+			},
+		)
+	}
+	if err != nil {
+		return diag.FromErr(err)
+	}
+	if len(serviceKeys) == 0 {
+		d.SetId("")
 		return nil
 	}
+	if len(serviceKeys) != 1 {
+		return diag.FromErr(fmt.Errorf("Some thing went wrong"))
+	}
+	d.Set("name", serviceKeys[0].Name)
+	d.Set("service_instance", serviceKeys[0].ServiceInstanceGUID)
+	d.SetId(serviceKeys[0].GUID)
+	serviceKeyDetails, _, err := session.ClientV3.GetServiceCredentialBindingDetails(d.Id())
+	if err != nil {
+		return diag.FromErr(err)
+	}
+	d.Set("credentials", normalizeMap(serviceKeyDetails.Credentials, make(map[string]interface{}), "", "_"))
+	return nil
+}
+
+func resourceServiceKeyDelete(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
+	// Note : When deleting credential bindings originated from user provided service instances,
+	// the delete operation does not require interactions with service brokers,
+	// therefore the API will respond synchronously to the delete request.
+	session := meta.(*managers.Session)
+	jobURL, _, err := session.ClientV3.DeleteServiceCredentialBinding(d.Id())
+
+	if err != nil {
+		return diag.FromErr(err)
+	}
+
+	if jobURL == "" {
+		log.Printf("[INFO] Deleted service credential binding %s for User-Provided service instance, finishing without polling", d.Id())
+		return diag.FromErr(err)
+	}
+
+	// Polling when deleting service credential binding for a managed service instance
+	err = common.PollingWithTimeout(func() (bool, error) {
+		job, _, err := session.ClientV3.GetJob(jobURL)
+		if err != nil {
+			return true, err
+		}
+
+		// Stop polling and return error if job failed
+		if job.State == constant.JobFailed {
+			return true, fmt.Errorf(
+				"Service key deletion failed, reason: %+v",
+				job.Errors(),
+			)
+		}
+
+		// Check binding state if job completed
+		if job.State == constant.JobComplete {
+			return true, nil
+		}
+		// Last operation initial or inprogress or job not completed, continue polling
+		return false, nil
+	}, 5*time.Second, 60*time.Second)
+	return diag.FromErr(err)
 }

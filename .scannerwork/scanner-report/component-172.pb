@@ -1,0 +1,1 @@
+¬ 2jsonXhrdocs/.markdownlint.json

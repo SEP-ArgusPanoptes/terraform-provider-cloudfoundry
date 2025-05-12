@@ -1,1 +1,1 @@
-… 2goX¨hr6cloudfoundry/resource_cf_private_domain_access_test.go
+… 2goXUhr1cloudfoundry/resource_cf_private_domain_access.go

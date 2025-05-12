@@ -1,167 +1,84 @@
 package cloudfoundry
 
 import (
-	"fmt"
+	"context"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/diag"
 	"github.com/terraform-providers/terraform-provider-cloudfoundry/cloudfoundry/managers"
-	"testing"
 
-	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/resource"
-	"github.com/hashicorp/terraform-plugin-sdk/v2/terraform"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
 )
 
-const privateDomainAccessResourceCreate = `
-resource "cloudfoundry_org" "org1" {
-  name = "org1"
-}
+func resourcePrivateDomainAccess() *schema.Resource {
+	return &schema.Resource{
+		CreateContext: resourcePrivateDomainAccessCreate,
+		ReadContext:   resourcePrivateDomainAccessRead,
+		DeleteContext: resourcePrivateDomainAccessDelete,
+		Importer: &schema.ResourceImporter{
+			StateContext: ImportReadContext(resourcePrivateDomainAccessRead),
+		},
 
-resource "cloudfoundry_org" "org2" {
-  name = "org2"
-}
-
-resource "cloudfoundry_org" "org3" {
-  name = "org3"
-}
-
-resource "cloudfoundry_domain" "private" {
-    sub_domain = "private"
-    domain     = "%s"
-    org        = "${cloudfoundry_org.org1.id}"
-}
-
-resource "cloudfoundry_private_domain_access" "access-to-org" {
-    domain     = "${cloudfoundry_domain.private.id}"
-    org        = "${cloudfoundry_org.org2.id}"
-}
-`
-
-const privateDomainAccessResourceUpdate = `
-resource "cloudfoundry_org" "org1" {
-  name = "org1"
-}
-
-resource "cloudfoundry_org" "org2" {
-  name = "org2"
-}
-
-resource "cloudfoundry_org" "org3" {
-  name = "org3"
-}
-
-resource "cloudfoundry_domain" "private" {
-    sub_domain = "private"
-    domain     = "%s"
-    org        = "${cloudfoundry_org.org1.id}"
-}
-
-resource "cloudfoundry_private_domain_access" "access-to-org" {
-    domain     = "${cloudfoundry_domain.private.id}"
-    org        = "${cloudfoundry_org.org3.id}"
-}
-`
-
-const privateDomainAccessResourceDelete = `
-resource "cloudfoundry_org" "org1" {
-  name = "org1"
-}
-
-resource "cloudfoundry_org" "org2" {
-  name = "org2"
-}
-
-resource "cloudfoundry_org" "org3" {
-  name = "org3"
-}
-
-resource "cloudfoundry_domain" "private" {
-    sub_domain = "private"
-    domain     = "%s"
-    org        = "${cloudfoundry_org.org1.id}"
-}
-`
-
-func TestAccResPrivateDomainAccess_normal(t *testing.T) {
-	ref := "cloudfoundry_private_domain_access.access-to-org"
-
-	resource.Test(t,
-		resource.TestCase{
-			PreCheck:          func() { testAccPreCheck(t) },
-			ProviderFactories: testAccProvidersFactories,
-			Steps: []resource.TestStep{
-				resource.TestStep{
-					Config: fmt.Sprintf(privateDomainAccessResourceCreate, defaultAppDomain()),
-					Check: resource.ComposeTestCheckFunc(
-						checkPrivateDomainShare(ref, "cloudfoundry_domain.private", "cloudfoundry_org.org2", true),
-						checkPrivateDomainShare(ref, "cloudfoundry_domain.private", "cloudfoundry_org.org3", false),
-					),
-				},
-				resource.TestStep{
-					Config: fmt.Sprintf(privateDomainAccessResourceUpdate, defaultAppDomain()),
-					Check: resource.ComposeTestCheckFunc(
-						checkPrivateDomainShare(ref, "cloudfoundry_domain.private", "cloudfoundry_org.org2", false),
-						checkPrivateDomainShare(ref, "cloudfoundry_domain.private", "cloudfoundry_org.org3", true),
-					),
-				},
-				resource.TestStep{
-					Config: fmt.Sprintf(privateDomainAccessResourceDelete, defaultAppDomain()),
-					Check: resource.ComposeTestCheckFunc(
-						checkPrivateDomainShare("", "cloudfoundry_domain.private", "cloudfoundry_org.org2", false),
-						checkPrivateDomainShare("", "cloudfoundry_domain.private", "cloudfoundry_org.org3", false),
-					),
-				},
+		Schema: map[string]*schema.Schema{
+			"domain": &schema.Schema{
+				Type:     schema.TypeString,
+				Required: true,
+				ForceNew: true,
 			},
-		})
+			"org": &schema.Schema{
+				Type:     schema.TypeString,
+				Required: true,
+				ForceNew: true,
+			},
+		},
+	}
 }
 
-func checkPrivateDomainShare(resource, domain, org string, exists bool) resource.TestCheckFunc {
-	return func(s *terraform.State) error {
-		session := testAccProvider.Meta().(*managers.Session)
+func resourcePrivateDomainAccessCreate(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
+	session := meta.(*managers.Session)
+	domain := d.Get("domain").(string)
+	org := d.Get("org").(string)
+	_, err := session.ClientV2.SetOrganizationPrivateDomain(domain, org)
+	if err != nil {
+		return diag.FromErr(err)
+	}
 
-		drs, ok := s.RootModule().Resources[domain]
-		if !ok {
-			return fmt.Errorf("domain '%s' not found in terraform state", domain)
+	d.SetId(computeID(org, domain))
+	return nil
+}
+
+func resourcePrivateDomainAccessRead(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
+	session := meta.(*managers.Session)
+
+	id := d.Id()
+	// id in read hook comes from create or import callback which ensure id's validity
+	orgGuid, domainGuid, _ := parseID(id)
+
+	found := false
+	domains, _, err := session.ClientV2.GetOrganizationPrivateDomains(orgGuid)
+	if err != nil {
+		return diag.FromErr(err)
+	}
+	for _, domain := range domains {
+		if domain.GUID == domainGuid {
+			found = true
+			break
 		}
-
-		ors, ok := s.RootModule().Resources[org]
-		if !ok {
-			return fmt.Errorf("org '%s' not found in terraform state", org)
-		}
-
-		orgID := ors.Primary.ID
-		domainID := drs.Primary.ID
-
-		found := false
-		domains, _, err := session.ClientV2.GetOrganizationPrivateDomains(orgID)
-		if err != nil {
-			return err
-		}
-		for _, domain := range domains {
-			if domain.GUID == domainID {
-				found = true
-				break
-			}
-		}
-
-		if !found && exists {
-			return fmt.Errorf("unable to find private domain access '%s(%s)' to org '%s(%s)'", domain, domainID, org, orgID)
-		}
-
-		if found && !exists {
-			return fmt.Errorf("private domain access '%s(%s)' to org '%s(%s)' not deleted as it ought to be", domain, domainID, org, orgID)
-		}
-
-		if len(resource) > 0 {
-			rs, ok := s.RootModule().Resources[resource]
-			if !ok {
-				return fmt.Errorf("private_domain_access '%s' not found in terraform state", resource)
-			}
-
-			id := rs.Primary.ID
-
-			if exists && id != fmt.Sprintf("%s/%s", orgID, domainID) {
-				return fmt.Errorf("unexpected private_domain_access resource identifier '%s' mismatch with '%s/%s'", id, orgID, domainID)
-			}
-		}
-
+	}
+	if !found {
+		d.SetId("")
 		return nil
 	}
+
+	d.Set("org", orgGuid)
+	d.Set("domain", domainGuid)
+	return nil
+}
+
+func resourcePrivateDomainAccessDelete(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
+	session := meta.(*managers.Session)
+
+	id := d.Id()
+
+	org, domain, _ := parseID(id)
+	_, err := session.ClientV2.DeleteOrganizationPrivateDomain(org, domain)
+	return diag.FromErr(err)
 }

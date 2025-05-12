@@ -1,34 +1,23 @@
 package cloudfoundry
 
 import (
-	"testing"
-
 	"fmt"
+	"testing"
 
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/resource"
 )
 
-func TestAccRoute_importBasic(t *testing.T) {
-
-	_, orgName := defaultTestOrg(t)
-	_, spaceName := defaultTestSpace(t)
-
-	resourceName := "cloudfoundry_route.test-app-route"
+func TestAccPrivateDomainAccess_importBasic(t *testing.T) {
+	resourceName := "cloudfoundry_private_domain_access.access-to-org"
 
 	resource.Test(t,
 		resource.TestCase{
 			PreCheck:          func() { testAccPreCheck(t) },
 			ProviderFactories: testAccProvidersFactories,
-			CheckDestroy:      testAccCheckRouteDestroyed([]string{"test-app-single", "test-app-multi"}, defaultAppDomain()),
 			Steps: []resource.TestStep{
-
 				resource.TestStep{
-					Config: fmt.Sprintf(routeResource,
-						defaultAppDomain(),
-						orgName, spaceName,
-						appPath),
+					Config: fmt.Sprintf(privateDomainAccessResourceCreate, defaultAppDomain()),
 				},
-
 				resource.TestStep{
 					ResourceName:      resourceName,
 					ImportState:       true,

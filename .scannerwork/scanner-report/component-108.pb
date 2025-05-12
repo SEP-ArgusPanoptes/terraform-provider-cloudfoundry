@@ -1,1 +1,1 @@
-l 2goXÓhrcloudfoundry/resource_cf_asg.go
+l 2goX”hr$cloudfoundry/resource_cf_app_test.go

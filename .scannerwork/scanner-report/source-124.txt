@@ -1,194 +1,188 @@
 package cloudfoundry
 
 import (
-	"context"
+	"code.cloudfoundry.org/cli/api/cloudcontroller/ccv3"
 	"fmt"
-
-	"github.com/hashicorp/terraform-plugin-sdk/v2/diag"
-
-	"code.cloudfoundry.org/cfnetworking-cli-api/cfnetworking/cfnetv1"
-	"github.com/hashicorp/go-uuid"
-	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
-	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/validation"
-	"github.com/terraform-providers/terraform-provider-cloudfoundry/cloudfoundry/hashcode"
 	"github.com/terraform-providers/terraform-provider-cloudfoundry/cloudfoundry/managers"
+	"testing"
+
+	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/resource"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/terraform"
 )
 
-func resourceNetworkPolicy() *schema.Resource {
+const segmentResource = `
+resource "cloudfoundry_org" "iso-org1" {
+	name = "iso-organization-one"
+}
+resource "cloudfoundry_org" "iso-org2" {
+	name = "iso-organization-two"
+}
+resource "cloudfoundry_isolation_segment" "segment1" {
+	name = "segment-one"
+}
+resource "cloudfoundry_isolation_segment_entitlement" "segment1_orgs" {
+	segment = "${cloudfoundry_isolation_segment.segment1.id}"
+	orgs = [
+    "${cloudfoundry_org.iso-org1.id}",
+    "${cloudfoundry_org.iso-org2.id}"
+  ]
+}
+`
 
-	return &schema.Resource{
+const segmentResourceUpdateName = `
+resource "cloudfoundry_org" "iso-org1" {
+	name = "iso-organization-one"
+}
+resource "cloudfoundry_org" "iso-org2" {
+	name = "iso-organization-two"
+}
+resource "cloudfoundry_isolation_segment" "segment1" {
+	name = "segment-one-name"
+}
+resource "cloudfoundry_isolation_segment_entitlement" "segment1_orgs" {
+	segment = "${cloudfoundry_isolation_segment.segment1.id}"
+	orgs = [
+    "${cloudfoundry_org.iso-org1.id}",
+    "${cloudfoundry_org.iso-org2.id}"
+  ]
+}
+`
 
-		CreateContext: resourceNetworkPolicyCreate,
-		ReadContext:   resourceNetworkPolicyRead,
-		UpdateContext: resourceNetworkPolicyUpdate,
-		DeleteContext: resourceNetworkPolicyDelete,
+const segmentResourceUpdateOrgs = `
+resource "cloudfoundry_org" "iso-org1" {
+	name = "iso-organization-one"
+}
+resource "cloudfoundry_isolation_segment" "segment1" {
+	name = "segment-one-name"
+}
+resource "cloudfoundry_isolation_segment_entitlement" "segment1_orgs" {
+	segment = "${cloudfoundry_isolation_segment.segment1.id}"
+	orgs = [
+    	"${cloudfoundry_org.iso-org1.id}"
+  	]
+	default = true
+}
+`
 
-		Schema: map[string]*schema.Schema{
-			"policy": &schema.Schema{
-				Type:     schema.TypeSet,
-				Optional: true,
-				Set: func(v interface{}) int {
-					elem := v.(map[string]interface{})
-					str := fmt.Sprintf("%s-%s-%s-%s",
-						elem["source_app"],
-						elem["destination_app"],
-						elem["protocol"],
-						elem["port"],
-					)
-					return hashcode.String(str)
+var defaultLenIsolationSegments int
+
+func TestAccResSegment_normal(t *testing.T) {
+	segRef := "cloudfoundry_isolation_segment.segment1"
+	entitleRef := "cloudfoundry_isolation_segment_entitlement.segment1_orgs"
+
+	segments, _, err := testSession().ClientV3.GetIsolationSegments()
+	if err != nil {
+		panic(err)
+	}
+	defaultLenIsolationSegments = len(segments)
+	resource.ParallelTest(t,
+		resource.TestCase{
+			PreCheck:          func() { testAccPreCheck(t) },
+			ProviderFactories: testAccProvidersFactories,
+			CheckDestroy:      testAccCheckSegmentDestroyed("segment-one-name"),
+			Steps: []resource.TestStep{
+				resource.TestStep{
+					Config: segmentResource,
+					Check: resource.ComposeTestCheckFunc(
+						testAccCheckSegmentExists(segRef, entitleRef),
+						resource.TestCheckResourceAttr(segRef, "name", "segment-one"),
+						resource.TestCheckResourceAttr(entitleRef, "orgs.#", "2"),
+					),
 				},
-				Elem: &schema.Resource{
-					Schema: map[string]*schema.Schema{
-						"source_app": &schema.Schema{
-							Type:     schema.TypeString,
-							Required: true,
-						},
-						"destination_app": &schema.Schema{
-							Type:     schema.TypeString,
-							Required: true,
-						},
-						"port": &schema.Schema{
-							Type:     schema.TypeString,
-							Required: true,
-							ValidateFunc: func(i interface{}, s string) ([]string, []error) {
-								_, _, err := portRangeParse(i.(string))
-								if err != nil {
-									return []string{}, []error{err}
-								}
-								return []string{}, []error{}
-							},
-						},
-						"protocol": &schema.Schema{
-							Type:         schema.TypeString,
-							Optional:     true,
-							ValidateFunc: validation.StringInSlice([]string{"tcp", "udp"}, false),
-							Default:      "tcp",
-						},
-					},
+				resource.TestStep{
+					Config: segmentResourceUpdateName,
+					Check: resource.ComposeTestCheckFunc(
+						testAccCheckSegmentExists(segRef, entitleRef),
+						resource.TestCheckResourceAttr(segRef, "name", "segment-one-name"),
+						resource.TestCheckResourceAttr(entitleRef, "orgs.#", "2"),
+					),
+				},
+				resource.TestStep{
+					Config: segmentResourceUpdateOrgs,
+					Check: resource.ComposeTestCheckFunc(
+						testAccCheckSegmentExists(segRef, entitleRef),
+						resource.TestCheckResourceAttr(segRef, "name", "segment-one-name"),
+						resource.TestCheckResourceAttr(entitleRef, "orgs.#", "1"),
+					),
 				},
 			},
-		},
-	}
+		})
 }
 
-func resourceNetworkPolicyCreate(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
-	session := meta.(*managers.Session)
-	guid, err := uuid.GenerateUUID()
-	if err != nil {
-		return diag.FromErr(err)
-	}
-	d.SetId(guid)
-	policiesTf := GetListOfStructs(d.Get("policy"))
-	err = session.NetClient.CreatePolicies(resourceNetworkPoliciesToPolicies(policiesTf))
-	if err != nil {
-		return diag.FromErr(err)
-	}
-	return nil
-}
+func testAccCheckSegmentExists(segName string, entitleName string) resource.TestCheckFunc {
+	return func(s *terraform.State) (err error) {
+		session := testAccProvider.Meta().(*managers.Session)
+		sm := session.ClientV3
 
-func resourceNetworkPolicyRead(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
-	session := meta.(*managers.Session)
+		seg, ok := s.RootModule().Resources[segName]
+		if !ok {
+			return fmt.Errorf("segment '%s' not found in terraform state", segName)
+		}
+		entitle, ok := s.RootModule().Resources[entitleName]
+		if !ok {
+			return fmt.Errorf("segment '%s' not found in terraform state", entitleName)
+		}
 
-	policiesTf := GetListOfStructs(d.Get("policy"))
-
-	idsMap := make(map[string]bool)
-	for _, p := range policiesTf {
-		idsMap[p["source_app"].(string)] = true
-		idsMap[p["destination_app"].(string)] = true
-	}
-	ids := make([]string, 0)
-	for k := range idsMap {
-		ids = append(ids, k)
-	}
-	policies, err := session.NetClient.ListPolicies(ids...)
-	if err != nil {
-		return diag.FromErr(err)
-	}
-
-	finalPolicies := intersectSlices(policiesTf, policies, func(source, item interface{}) bool {
-		policyTf := source.(map[string]interface{})
-		policy := item.(cfnetv1.Policy)
-		start, end, err := portRangeParse(policyTf["port"].(string))
+		segID := seg.Primary.ID
+		segAttributes := seg.Primary.Attributes
+		segment, _, err := sm.GetIsolationSegment(segID)
 		if err != nil {
-			// this is already validated in validate func
-			// so if we have something wrong we are deeply unlucky
-			panic(err)
+			return fmt.Errorf("segment '%s' not found", segName)
 		}
-		if start != policy.Destination.Ports.Start || end != policy.Destination.Ports.End {
-			return false
+
+		if err = assertEquals(segAttributes, "name", segment.Name); err != nil {
+			return err
 		}
-		return policyTf["source_app"].(string) == policy.Source.ID &&
-			policyTf["destination_app"].(string) == policy.Destination.ID &&
-			policyTf["protocol"].(string) == string(policy.Destination.Protocol)
-	})
-	d.Set("policy", finalPolicies)
-	return nil
+
+		entitleID := entitle.Primary.ID
+		entitleAttributes := entitle.Primary.Attributes
+		if entitleAttributes["segment"] != segID {
+			return fmt.Errorf("entitlement resource id '%s does not match segment id '%s'", entitleID, segID)
+		}
+
+		if err = assertEquals(entitleAttributes, "segment", segID); err != nil {
+			return err
+		}
+		orgs, _, err := sm.GetIsolationSegmentOrganizations(entitleAttributes["segment"])
+		if err != nil {
+			return fmt.Errorf("could fetch orgs from segment '%s'", segID)
+		}
+		tfOrgs := make([]interface{}, len(orgs))
+		for i, org := range orgs {
+			tfOrgs[i] = org.GUID
+		}
+		if err = assertSetEquals(entitleAttributes, "orgs", tfOrgs); err != nil {
+			return err
+		}
+		for _, org := range orgs {
+			rl, _, err := sm.GetOrganizationDefaultIsolationSegment(org.GUID)
+			if err != nil {
+				return err
+			}
+			if entitleAttributes["default"] == "1" && rl.GUID != segID {
+				return fmt.Errorf("entitlement resource default isolation segment for org %s mismatch, this should be using current segment", org.Name)
+			}
+			if entitleAttributes["default"] == "0" && rl.GUID == segID {
+				return fmt.Errorf("entitlement resource default isolation segment for org %s mismatch, this should be not using current segment", org.Name)
+			}
+		}
+		return
+	}
 }
 
-func resourceNetworkPolicyUpdate(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
-	session := meta.(*managers.Session)
-	old, now := d.GetChange("policy")
-	remove, add := getListMapChanges(old, now, func(source, item map[string]interface{}) bool {
-		return source["source_app"] == item["source_app"] &&
-			source["destination_app"] == item["destination_app"] &&
-			source["protocol"] == item["protocol"] &&
-			source["port"] == item["port"]
-	})
-	if len(remove) > 0 {
-		err := session.NetClient.RemovePolicies(resourceNetworkPoliciesToPolicies(remove))
+func testAccCheckSegmentDestroyed(segName string) resource.TestCheckFunc {
+	return func(s *terraform.State) error {
+		session := testAccProvider.Meta().(*managers.Session)
+		orgs, _, err := session.ClientV3.GetIsolationSegments(ccv3.Query{
+			Key:    ccv3.NameFilter,
+			Values: []string{segName},
+		})
 		if err != nil {
-			return diag.FromErr(err)
+			return err
 		}
-	}
-	if len(add) > 0 {
-		err := session.NetClient.CreatePolicies(resourceNetworkPoliciesToPolicies(add))
-		if err != nil {
-			return diag.FromErr(err)
+		if len(orgs) > 0 {
+			return fmt.Errorf("segment with name '%s' still exists in cloud foundry", segName)
 		}
+		return nil
 	}
-
-	return nil
-}
-
-func resourceNetworkPolicyDelete(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
-	var diags diag.Diagnostics
-
-	session := meta.(*managers.Session)
-	policiesTf := GetListOfStructs(d.Get("policy"))
-	if len(policiesTf) == 0 { // Policies already removed
-		d.SetId("")
-		return diags
-	}
-	id := d.Id()
-	err := session.NetClient.RemovePolicies(resourceNetworkPoliciesToPolicies(policiesTf))
-	if err != nil {
-		return diag.FromErr(fmt.Errorf("delete network policy %s: %w", id, err))
-	}
-	return diags
-}
-
-func resourceNetworkPoliciesToPolicies(policiesTf []map[string]interface{}) []cfnetv1.Policy {
-	policies := make([]cfnetv1.Policy, len(policiesTf))
-	for i, policyTf := range policiesTf {
-		ports := cfnetv1.Ports{}
-		start, end, err := portRangeParse(policyTf["port"].(string))
-		if err != nil {
-			// this is already validated in validate func
-			// so if we have something wrong we are deeply unlucky
-			panic(err)
-		}
-		ports.Start = start
-		ports.End = end
-		policies[i] = cfnetv1.Policy{
-			Source: cfnetv1.PolicySource{
-				ID: policyTf["source_app"].(string),
-			},
-			Destination: cfnetv1.PolicyDestination{
-				Protocol: cfnetv1.PolicyProtocol(policyTf["protocol"].(string)),
-				ID:       policyTf["destination_app"].(string),
-				Ports:    ports,
-			},
-		}
-	}
-	return policies
 }

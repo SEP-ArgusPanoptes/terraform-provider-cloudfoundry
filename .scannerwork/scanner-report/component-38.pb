@@ -1,1 +1,1 @@
-& 2goX1hr*cloudfoundry/data_source_cf_space_quota.go
+& 2goXlhr$cloudfoundry/data_source_cf_space.go

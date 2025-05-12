@@ -1,63 +1,63 @@
 package cloudfoundry
 
 import (
-	"context"
-
-	"code.cloudfoundry.org/cli/api/cloudcontroller/ccv3"
-	"github.com/hashicorp/terraform-plugin-sdk/v2/diag"
+	"fmt"
 	"github.com/terraform-providers/terraform-provider-cloudfoundry/cloudfoundry/managers"
+	"testing"
 
-	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/resource"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/terraform"
 )
 
-func dataSourceOrg() *schema.Resource {
+const isolationDataResource = `
 
-	return &schema.Resource{
+data "cloudfoundry_isolation_segment" "segment-one" {
+    name = "%s"
+}
+`
 
-		ReadContext: dataSourceOrgRead,
+func TestAccDataSourceIsolationSegment_normal(t *testing.T) {
 
-		Schema: map[string]*schema.Schema{
+	_, defaultSegmentName := getTestDefaultIsolationSegment(t)
+	ref := "data.cloudfoundry_isolation_segment.segment-one"
 
-			"name": &schema.Schema{
-				Type:     schema.TypeString,
-				Required: true,
+	resource.ParallelTest(t,
+		resource.TestCase{
+			PreCheck:          func() { testAccPreCheck(t) },
+			ProviderFactories: testAccProvidersFactories,
+			Steps: []resource.TestStep{
+
+				resource.TestStep{
+					Config: fmt.Sprintf(isolationDataResource, defaultSegmentName),
+					Check: resource.ComposeTestCheckFunc(
+						checkDataSourceIsolationExists(ref),
+						resource.TestCheckResourceAttr(
+							ref, "name", defaultSegmentName),
+					),
+				},
 			},
-			labelsKey:      labelsSchema(),
-			annotationsKey: annotationsSchema(),
-		},
-	}
+		})
 }
 
-func dataSourceOrgRead(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
+func checkDataSourceIsolationExists(resource string) resource.TestCheckFunc {
 
-	session := meta.(*managers.Session)
-	if session == nil {
-		return diag.Errorf("client is nil")
+	return func(s *terraform.State) error {
+
+		session := testAccProvider.Meta().(*managers.Session)
+
+		rs, ok := s.RootModule().Resources[resource]
+		if !ok {
+			return fmt.Errorf("isolation segment '%s' not found in terraform state", resource)
+		}
+
+		id := rs.Primary.ID
+		attributes := rs.Primary.Attributes
+
+		segment, _, err := session.ClientV3.GetIsolationSegment(id)
+		if err != nil {
+			return err
+		}
+		err = assertEquals(attributes, "name", segment.Name)
+		return err
 	}
-
-	name := d.Get("name").(string)
-
-	orgs, _, err := session.ClientV3.GetOrganizations(ccv3.Query{
-		Key:    "names",
-		Values: []string{name},
-	})
-
-	if err != nil {
-		return diag.FromErr(err)
-	}
-
-	if len(orgs) == 0 {
-		return diag.FromErr(NotFound)
-	}
-	if len(orgs) != 1 {
-		return diag.Errorf("Found more than one org")
-	}
-
-	d.SetId(orgs[0].GUID)
-
-	err = metadataRead(orgMetadata, d, meta, true)
-	if err != nil {
-		return diag.FromErr(err)
-	}
-	return diag.FromErr(err)
 }

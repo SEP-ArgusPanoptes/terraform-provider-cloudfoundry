@@ -1,181 +1,248 @@
 package cloudfoundry
 
 import (
-	"code.cloudfoundry.org/cli/api/cloudcontroller/ccv2"
-	"context"
-	"github.com/hashicorp/terraform-plugin-sdk/v2/diag"
-	"github.com/terraform-providers/terraform-provider-cloudfoundry/cloudfoundry/managers"
-	"strings"
+	"fmt"
+	"testing"
 
+	"code.cloudfoundry.org/cli/api/cloudcontroller/ccv2"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
+	"github.com/terraform-providers/terraform-provider-cloudfoundry/cloudfoundry/managers"
+
+	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/resource"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/terraform"
 )
 
-func resourceDomain() *schema.Resource {
+const defaultRunningSecurityGroupResource = `
 
-	return &schema.Resource{
+resource "cloudfoundry_asg" "apps" {
 
-		CreateContext: resourceDomainCreate,
-		ReadContext:   resourceDomainRead,
-		DeleteContext: resourceDomainDelete,
+	name = "pcf-apps"
 
-		Importer: &schema.ResourceImporter{
-			StateContext: ImportReadContext(resourceDomainRead),
-		},
+    rule {
+        destination = "192.168.100.0/24"
+        protocol = "all"
+    }
+}
 
-		Schema: map[string]*schema.Schema{
+resource "cloudfoundry_asg" "services" {
 
-			"name": &schema.Schema{
-				Type:     schema.TypeString,
-				ForceNew: true,
-				Optional: true,
-				Computed: true,
+	name = "pcf-services"
+
+    rule {
+        destination = "192.168.101.0/24"
+        protocol = "all"
+    }
+}
+
+resource "cloudfoundry_default_asg" "running" {
+	name = "running"
+    asgs = [ "${cloudfoundry_asg.apps.id}", "${cloudfoundry_asg.services.id}" ]
+}
+`
+
+const defaultRunningSecurityGroupResourceUpdate = `
+resource "cloudfoundry_asg" "apps" {
+
+	name = "pcf-apps"
+
+    rule {
+        destination = "192.168.100.0/24"
+        protocol = "all"
+    }
+}
+
+resource "cloudfoundry_asg" "services" {
+
+	name = "pcf-services"
+
+    rule {
+        destination = "192.168.101.0/24"
+        protocol = "all"
+    }
+}
+
+resource "cloudfoundry_default_asg" "running" {
+	name = "running"
+    asgs = [ "${cloudfoundry_asg.apps.id}" ]
+}
+`
+
+const defaultStagingSecurityGroupResource = `
+
+resource "cloudfoundry_asg" "apps" {
+
+	name = "pcf-apps"
+
+    rule {
+        destination = "192.168.100.0/24"
+        protocol = "all"
+    }
+}
+
+resource "cloudfoundry_default_asg" "staging" {
+  name = "staging"
+  asgs = [ "${cloudfoundry_asg.apps.id}" ]
+}
+`
+
+var defaultLenRunningSecGroup int
+var defaultLenStagingSecGroup int
+
+func TestAccResDefaultRunningAsg_normal(t *testing.T) {
+
+	ref := "cloudfoundry_default_asg.running"
+	asgs, _, err := testSession().ClientV2.GetRunningSecurityGroups()
+	if err != nil {
+		panic(err)
+	}
+	defaultLenRunningSecGroup = len(asgs)
+	asgs, _, err = testSession().ClientV2.GetStagingSecurityGroups()
+	if err != nil {
+		panic(err)
+	}
+	defaultLenStagingSecGroup = len(asgs)
+	resource.ParallelTest(t,
+		resource.TestCase{
+			PreCheck:          func() { testAccPreCheck(t) },
+			ProviderFactories: testAccProvidersFactories,
+			CheckDestroy:      testAccCheckDefaultRunningAsgDestroy,
+			Steps: []resource.TestStep{
+
+				resource.TestStep{
+					Config: defaultRunningSecurityGroupResource,
+					Check: resource.ComposeTestCheckFunc(
+						checkDefaultAsgsExists(ref),
+						resource.TestCheckResourceAttr(
+							ref, "name", "running"),
+						resource.TestCheckResourceAttr(
+							ref, "asgs.#", "2"),
+					),
+				},
+				resource.TestStep{
+					ResourceName: ref,
+					ImportState:  true,
+					ImportStateCheck: func(states []*terraform.InstanceState) error {
+						if len(states) == 0 {
+							return fmt.Errorf("There is no import state")
+						}
+						entity := resourceDefaultAsg()
+						state := states[0]
+						reader := &schema.MapFieldReader{
+							Schema: entity.Schema,
+							Map:    schema.BasicMapReader(state.Attributes),
+						}
+						result, err := reader.ReadField([]string{"asgs"})
+						if err != nil {
+							return err
+						}
+						if len(result.Value.(*schema.Set).List()) != defaultLenRunningSecGroup+2 {
+							return fmt.Errorf("missing default running sec group")
+						}
+						return nil
+					},
+				},
+				resource.TestStep{
+					Config: fmt.Sprintf(defaultRunningSecurityGroupResourceUpdate),
+					Check: resource.ComposeTestCheckFunc(
+						checkDefaultAsgsExists(ref),
+						resource.TestCheckResourceAttr(
+							ref, "name", "running"),
+						resource.TestCheckResourceAttr(
+							ref, "asgs.#", "1"),
+					),
+				},
 			},
-			"sub_domain": &schema.Schema{
-				Type:     schema.TypeString,
-				ForceNew: true,
-				Optional: true,
-				Computed: true,
-			},
-			"domain": &schema.Schema{
-				Type:     schema.TypeString,
-				ForceNew: true,
-				Optional: true,
-				Computed: true,
-			},
-			"internal": &schema.Schema{
-				Type:        schema.TypeBool,
-				ForceNew:    true,
-				Optional:    true,
-				Description: "Flag that sets the domain as an internal domain. Internal domains are used for internal app to app networking only.",
-				Default:     false,
-			},
-			"router_group": &schema.Schema{
-				Type:          schema.TypeString,
-				ForceNew:      true,
-				Optional:      true,
-				ConflictsWith: []string{"org"},
-			},
-			"router_type": &schema.Schema{
-				Type:     schema.TypeString,
-				Computed: true,
-			},
-			"org": &schema.Schema{
-				Type:          schema.TypeString,
-				ForceNew:      true,
-				Optional:      true,
-				ConflictsWith: []string{"router_group"},
-			},
-			// "shared-with": &schema.Schema{
-			// 	Type:     schema.TypeSet,
-			// 	Optional: true,
-			// 	Elem:     &schema.Schema{Type: schema.TypeString},
-			// 	Set:      resourceStringHash,
-			// },
-		},
+		})
+}
+
+func checkDefaultAsgsExists(resource string) resource.TestCheckFunc {
+
+	return func(s *terraform.State) error {
+
+		session := testAccProvider.Meta().(*managers.Session)
+
+		rs, ok := s.RootModule().Resources[resource]
+		if !ok {
+			return fmt.Errorf("asg '%s' not found in terraform state", resource)
+		}
+
+		id := rs.Primary.ID
+		attributes := rs.Primary.Attributes
+
+		var asgs []ccv2.SecurityGroup
+		var lenAsgs int
+		var err error
+		switch id {
+		case "running":
+			asgs, _, err = session.ClientV2.GetRunningSecurityGroups()
+			if err != nil {
+				return err
+			}
+			lenAsgs = len(asgs) - defaultLenRunningSecGroup
+		case "staging":
+			asgs, _, err = session.ClientV2.GetStagingSecurityGroups()
+			if err != nil {
+				return err
+			}
+			lenAsgs = len(asgs) - defaultLenStagingSecGroup
+		}
+
+		entity := resourceDefaultAsg()
+		reader := &schema.MapFieldReader{
+			Schema: entity.Schema,
+			Map:    schema.BasicMapReader(attributes),
+		}
+		result, err := reader.ReadField([]string{"asgs"})
+		if err != nil {
+			return err
+		}
+		asgsTf := result.Value.(*schema.Set).List()
+
+		if len(asgsTf) != lenAsgs {
+			return fmt.Errorf("Expected %d asgs got %d", len(asgsTf), lenAsgs)
+		}
+
+		for _, asgTf := range asgsTf {
+			inside := isInSlice(asgs, func(object interface{}) bool {
+				asg := object.(ccv2.SecurityGroup)
+				return asg.GUID == asgTf.(string)
+			})
+			if !inside {
+				return fmt.Errorf("Missing creation of %s asgs", asgTf.(string))
+			}
+		}
+
+		return nil
 	}
 }
 
-func resourceDomainCreate(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
+func testAccCheckDefaultRunningAsgDestroy(s *terraform.State) error {
 
-	session := meta.(*managers.Session)
+	session := testAccProvider.Meta().(*managers.Session)
+	am := session.ClientV2
 
-	nameAttr, nameOk := d.GetOk("name")
-	subDomainAttr, subDomainOk := d.GetOk("sub_domain")
-	domainAttr, domainOk := d.GetOk("domain")
-	org, orgOk := d.GetOk("org")
-	routerGroup := d.Get("router_group")
-
-	if nameOk {
-
-		domainParts := strings.Split(nameAttr.(string), ".")
-		if len(domainParts) <= 1 {
-			return diag.Errorf("the 'name' attribute does not contain a sub-domain")
-		}
-		sd := domainParts[0]
-		dn := strings.Join(domainParts[1:], ".")
-
-		if subDomainOk {
-			return diag.Errorf("the 'sub_domain' will be computed from the 'name' attribute, so it is not needed here")
-		}
-		if domainOk {
-			return diag.Errorf("the 'domain' will be computed from the 'name' attribute, so it is not needed here")
-		}
-		d.Set("sub_domain", sd)
-		d.Set("domain", dn)
-	} else {
-		if !subDomainOk || !domainOk {
-			return diag.Errorf("to compute the 'name' both the 'sub_domain' and 'domain' attributes need to be provided")
-		}
-		d.Set("name", subDomainAttr.(string)+"."+domainAttr.(string))
-	}
-
-	var (
-		ccDomain ccv2.Domain
-		err      error
-	)
-	name := d.Get("name").(string)
-
-	dm := session.ClientV2
-	if orgOk {
-		ccDomain, _, err = dm.CreatePrivateDomain(name, org.(string))
-	} else {
-		ccDomain, _, err = dm.CreateSharedDomain(name, routerGroup.(string), d.Get("internal").(bool))
-	}
+	asgs, _, err := am.GetRunningSecurityGroups()
 	if err != nil {
-		return diag.FromErr(err)
+		return err
 	}
-	d.Set("router_type", ccDomain.RouterGroupType)
-	d.SetId(ccDomain.GUID)
+	if len(asgs) != defaultLenRunningSecGroup {
+		return fmt.Errorf("running asgs are not empty")
+	}
+
 	return nil
 }
 
-func resourceDomainRead(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
-	session := meta.(*managers.Session)
+func testAccCheckDefaultStagingAsgDestroy(s *terraform.State) error {
 
-	dm := session.ClientV2
-	id := d.Id()
+	session := testAccProvider.Meta().(*managers.Session)
+	am := session.ClientV2
 
-	ccDomain, _, err := dm.GetSharedDomain(id)
+	asgs, _, err := am.GetStagingSecurityGroups()
 	if err != nil {
-		ccDomain, _, err = dm.GetPrivateDomain(id)
+		return err
 	}
-	if err != nil {
-		if IsErrNotFound(err) {
-			d.SetId("")
-			return nil
-		}
-		return diag.FromErr(err)
+	if len(asgs) != defaultLenStagingSecGroup {
+		return fmt.Errorf("staging asgs are not empty")
 	}
-	domainParts := strings.Split(ccDomain.Name, ".")
-	subDomain := domainParts[0]
-	domain := strings.Join(domainParts[1:], ".")
-
-	d.Set("name", ccDomain.Name)
-	d.Set("sub_domain", subDomain)
-	d.Set("domain", domain)
-	d.Set("router_group", ccDomain.RouterGroupGUID)
-	d.Set("router_type", ccDomain.RouterGroupType)
-	d.Set("internal", ccDomain.Internal)
-	d.Set("org", ccDomain.OwningOrganizationGUID)
-
 	return nil
-}
-
-func resourceDomainDelete(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
-
-	session := meta.(*managers.Session)
-	if session == nil {
-		return diag.Errorf("client is nil")
-	}
-
-	dm := session.ClientV2
-	id := d.Id()
-
-	var err error
-	if _, orgOk := d.GetOk("org"); orgOk {
-		_, err = dm.DeletePrivateDomain(id)
-	} else {
-		_, err = dm.DeleteSharedDomain(id)
-	}
-	return diag.FromErr(err)
 }

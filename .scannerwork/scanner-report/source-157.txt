@@ -1,303 +1,357 @@
 package cloudfoundry
 
 import (
-	"context"
-	"encoding/json"
+	"fmt"
+	"io/ioutil"
 	"log"
 
-	"code.cloudfoundry.org/cli/api/cloudcontroller/ccv3"
-	"code.cloudfoundry.org/cli/resources"
-	"code.cloudfoundry.org/cli/types"
+	"code.cloudfoundry.org/cli/api/cloudcontroller/ccerror"
+	"code.cloudfoundry.org/cli/api/cloudcontroller/ccv2"
+	"code.cloudfoundry.org/cli/api/uaa"
+	"context"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/diag"
-
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
-	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/structure"
-	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/validation"
 	"github.com/terraform-providers/terraform-provider-cloudfoundry/cloudfoundry/managers"
 )
 
-func resourceUserProvidedService() *schema.Resource {
-
+func resourceUser() *schema.Resource {
 	return &schema.Resource{
 
-		CreateContext: resourceUserProvidedServiceCreate,
-		ReadContext:   resourceUserProvidedServiceRead,
-		UpdateContext: resourceUserProvidedServiceUpdate,
-		DeleteContext: resourceUserProvidedServiceDelete,
+		CreateContext: resourceUserCreate,
+		ReadContext:   resourceUserRead,
+		UpdateContext: resourceUserUpdate,
+		DeleteContext: resourceUserDelete,
 
 		Importer: &schema.ResourceImporter{
-			StateContext: schema.ImportStatePassthroughContext,
+			StateContext: ImportReadContext(resourceUserRead),
 		},
-
 		Schema: map[string]*schema.Schema{
-
 			"name": &schema.Schema{
-				Type:     schema.TypeString,
-				Required: true,
+				Type:             schema.TypeString,
+				Required:         true,
+				DiffSuppressFunc: CaseDifference,
 			},
-			"space": &schema.Schema{
+			"password": &schema.Schema{
+				Type:      schema.TypeString,
+				Optional:  true,
+				Sensitive: true,
+			},
+			"origin": &schema.Schema{
 				Type:     schema.TypeString,
 				ForceNew: true,
-				Required: true,
-			},
-			"syslog_drain_url": &schema.Schema{
-				Type:     schema.TypeString,
 				Optional: true,
-				Default:  "",
+				Default:  "uaa",
 			},
-			"syslogDrainURL": &schema.Schema{
-				Type:       schema.TypeString,
-				Optional:   true,
-				Default:    "",
-				Deprecated: "Use syslog_drain_url, Terraform complain about field name may only contain lowercase alphanumeric characters & underscores",
-			},
-			"route_service_url": &schema.Schema{
-				Type:     schema.TypeString,
-				Optional: true,
-				Default:  "",
-			},
-			"routeServiceURL": &schema.Schema{
-				Type:       schema.TypeString,
-				Optional:   true,
-				Default:    "",
-				Deprecated: "Use route_service_url, Terraform complain about field name may only contain lowercase alphanumeric characters & underscores",
-			},
-			"credentials": &schema.Schema{
-				Type:          schema.TypeMap,
-				Optional:      true,
-				Sensitive:     true,
-				ConflictsWith: []string{"credentials_json"},
-			},
-			"credentials_json": &schema.Schema{
+			"given_name": &schema.Schema{
 				Type:             schema.TypeString,
 				Optional:         true,
-				ConflictsWith:    []string{"credentials"},
-				Sensitive:        true,
-				DiffSuppressFunc: structure.SuppressJsonDiff,
-				ValidateFunc:     validation.StringIsJSON,
+				Computed:         true,
+				DiffSuppressFunc: CaseDifference,
 			},
-			"tags": &schema.Schema{
-				Type:     schema.TypeSet,
+			"family_name": &schema.Schema{
+				Type:             schema.TypeString,
+				Optional:         true,
+				Computed:         true,
+				DiffSuppressFunc: CaseDifference,
+			},
+			"email": &schema.Schema{
+				Type:     schema.TypeString,
+				Computed: true,
 				Optional: true,
-				Elem:     &schema.Schema{Type: schema.TypeString},
-				Set:      schema.HashString,
+			},
+			"groups": &schema.Schema{
+				Type:       schema.TypeSet,
+				ConfigMode: schema.SchemaConfigModeAttr,
+				Optional:   true,
+				Computed:   true,
+				Elem:       &schema.Schema{Type: schema.TypeString},
+				Set:        resourceStringHash,
 			},
 		},
 	}
 }
 
-func resourceUserProvidedServiceCreate(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
+func resourceUserCreate(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
 	session := meta.(*managers.Session)
-
-	name := d.Get("name").(string)
-	space := d.Get("space").(string)
-	syslogDrainURL := d.Get("syslog_drain_url").(string)
-	routeServiceURL := d.Get("route_service_url").(string)
-
-	// should be removed when syslogDrainURL and routeServiceURL will be removed
-	if syslogDrainURL == "" {
-		syslogDrainURL = d.Get("syslogDrainURL").(string)
+	if session == nil {
+		return diag.Errorf("client is nil")
 	}
-	if routeServiceURL == "" {
-		routeServiceURL = d.Get("routeServiceURL").(string)
-	}
-	// credentials := types.OptionalObject{}
 
-	credentials := make(map[string]interface{})
-	if credsJSON, hasJSON := d.GetOk("credentials_json"); hasJSON {
-		err := json.Unmarshal([]byte(credsJSON.(string)), &credentials)
-		if err != nil {
-			return diag.FromErr(err)
+	username := d.Get("name").(string)
+	password := d.Get("password").(string)
+	origin := d.Get("origin").(string)
+	givenName := d.Get("given_name").(string)
+	familyName := d.Get("family_name").(string)
+
+	email := d.Get("email").(string)
+	if email == "" {
+		email = username
+		d.Set("email", email)
+	}
+	emails := make([]uaa.Email, 0)
+	if email != "" {
+		emails = append(emails, uaa.Email{
+			Value:   email,
+			Primary: true,
+		})
+	}
+
+	var name uaa.UserName
+	if givenName != "" || familyName != "" {
+		name = uaa.UserName{
+			GivenName:  givenName,
+			FamilyName: familyName,
 		}
-	} else {
-		for k, v := range d.Get("credentials").(map[string]interface{}) {
-			credentials[k] = v.(string)
-		}
 	}
-	credentialsFormat := types.OptionalObject{
-		IsSet: len(credentials) != 0,
-		Value: credentials,
-	}
+	uaam := session.ClientUAA
+	um := session.ClientV2
 
-	tagsSchema := d.Get("tags").(*schema.Set)
-	tags := make([]string, 0)
-	for _, tag := range tagsSchema.List() {
-		tags = append(tags, tag.(string))
-	}
-
-	tagsFormat := types.OptionalStringSlice{
-		IsSet: tags != nil,
-		Value: tags,
-	}
-
-	syslogDrainURLFormat := types.OptionalString{
-		IsSet: syslogDrainURL != "",
-		Value: syslogDrainURL,
-	}
-
-	routeServiceURLFormat := types.OptionalString{
-		IsSet: routeServiceURL != "",
-		Value: routeServiceURL,
-	}
-
-	userProvidedServiceInstance := resources.ServiceInstance{
-		Type:            resources.UserProvidedServiceInstance,
-		Name:            name,
-		SpaceGUID:       space,
-		Credentials:     credentialsFormat,
-		Tags:            tagsFormat,
-		SyslogDrainURL:  syslogDrainURLFormat,
-		RouteServiceURL: routeServiceURLFormat,
-	}
-
-	// log.Printf("SI : %+v", userProvidedServiceInstance)
-	userProvidedSI, _, err := session.ClientV3.CreateUserProvidedServiceInstance(userProvidedServiceInstance)
-	// log.Printf("Created SI : %+v", userProvidedSI)
+	userUAA, err := createUaaUserIfNotExists(username, password, origin, &name, emails, uaam)
 	if err != nil {
 		return diag.FromErr(err)
 	}
 
+	userCF, err := createCFUserIfNotExists(userUAA.ID, um)
 	if err != nil {
 		return diag.FromErr(err)
 	}
 
-	d.SetId(userProvidedSI.GUID)
-	return nil
+	d.SetId(userCF.GUID)
+	return resourceUserUpdate(ctx, d, meta)
 }
 
-func resourceUserProvidedServiceRead(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
-	var userProvidedServiceInstance resources.ServiceInstance
-
-	session := meta.(*managers.Session)
-	GUID := d.Id()
-	userProvidedServiceInstances, _, _, err := session.ClientV3.GetServiceInstances(ccv3.Query{
-		Key:    ccv3.GUIDFilter,
-		Values: []string{GUID},
-	})
-
+func createCFUserIfNotExists(ID string, um *ccv2.Client) (ccv2.User, error) {
+	users, _, err := um.GetUsers()
 	if err != nil {
-		return diag.FromErr(err)
+		return ccv2.User{}, err
 	}
 
-	if len(userProvidedServiceInstances) == 0 {
+	for _, user := range users {
+		if user.GUID == ID {
+			return user, nil
+		}
+	}
+
+	user, _, err := um.CreateUser(ID)
+	return user, err
+}
+
+func createUaaUserIfNotExists(
+	username string,
+	password string,
+	origin string,
+	name *uaa.UserName,
+	emails []uaa.Email,
+	uaam *uaa.Client,
+) (uaa.User, error) {
+
+	createUser := func() (uaa.User, error) {
+		return uaam.CreateUserFromObject(uaa.User{
+			Username: username,
+			Password: password,
+			Origin:   origin,
+			Name:     *name,
+			Emails:   emails,
+		})
+	}
+
+	// create uaa user if not exists
+	users, err := uaam.GetUsersByUsername(username)
+	if err != nil {
+		if IsErrNotFound(err) {
+			return createUser()
+		}
+		return uaa.User{}, err
+	}
+
+	for _, uaaUser := range users {
+		// warn: GetUsersByUsername only fetch id and username attributes
+		user, err := uaam.GetUser(uaaUser.ID)
+		if err != nil {
+			return uaa.User{}, err
+		}
+		if user.Origin == origin {
+			return user, nil
+		}
+	}
+	return createUser()
+}
+
+func resourceUserRead(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
+
+	session := meta.(*managers.Session)
+
+	umuaa := session.ClientUAA
+	um := session.ClientV2
+	id := d.Id()
+
+	// 1. check  user exists in CF
+	usersCF, _, err := um.GetUsers()
+	if err != nil {
+		d.SetId("")
+		return diag.FromErr(err)
+	}
+	found := false
+	for _, user := range usersCF {
+		if user.GUID == id {
+			found = true
+			break
+		}
+	}
+	if !found {
 		d.SetId("")
 		return nil
 	}
 
-	userProvidedServiceInstance = userProvidedServiceInstances[0]
-
-	d.Set("name", userProvidedServiceInstance.Name)
-	d.Set("space", userProvidedServiceInstance.SpaceGUID)
-
-	syslogSet := false
-	syslogDrainURL := userProvidedServiceInstance.SyslogDrainURL.String()
-	if _, ok := d.GetOk("syslogDrainURL"); ok {
-		d.Set("syslogDrainURL", syslogDrainURL)
-		syslogSet = true
-	}
-	if _, ok := d.GetOk("syslog_drain_url"); ok {
-		d.Set("syslog_drain_url", syslogDrainURL)
-		syslogSet = true
-	}
-
-	if !syslogSet && syslogDrainURL != "" {
-		d.Set("syslog_drain_url", syslogDrainURL)
-	}
-
-	routeServiceSet := false
-	routeServiceURL := userProvidedServiceInstance.RouteServiceURL.String()
-	if _, ok := d.GetOk("routeServiceURL"); ok {
-		d.Set("routeServiceURL", routeServiceURL)
-		routeServiceSet = true
-	}
-	if _, ok := d.GetOk("route_service_url"); ok {
-		d.Set("route_service_url", routeServiceURL)
-		routeServiceSet = true
-	}
-	if !routeServiceSet && routeServiceURL != "" {
-		d.Set("route_service_url", routeServiceURL)
-	}
-
-	credentials, _, err := session.ClientV3.GetUserProvidedServiceInstanceCredentails(d.Id())
+	// 2. check  user exists in UAA
+	user, err := umuaa.GetUser(id)
 	if err != nil {
+		if IsErrNotFound(err) {
+			d.SetId("")
+			return nil
+		}
 		return diag.FromErr(err)
 	}
 
-	if _, hasJSON := d.GetOk("credentials_json"); hasJSON {
-		bytes, _ := json.Marshal(credentials)
-		log.Printf("Creds : %s //// state: %s", string(bytes), d.Get("credentials_json"))
-		d.Set("credentials_json", string(bytes))
+	d.Set("name", user.Username)
+	d.Set("origin", user.Origin)
+	d.Set("given_name", user.Name.GivenName)
+	d.Set("family_name", user.Name.FamilyName)
+	d.Set("email", user.Emails[0].Value)
+
+	tfGroups := d.Get("groups").(*schema.Set).List()
+	groups := user.Groups
+	if !IsImportState(d) {
+		finalGroups := intersectSlices(tfGroups, groups, func(source, item interface{}) bool {
+			return source.(string) == item.(uaa.Group).Name()
+		})
+		d.Set("groups", schema.NewSet(resourceStringHash, finalGroups))
 	} else {
-		d.Set("credentials", credentials)
+		d.Set("groups", schema.NewSet(resourceStringHash, objectsToIds(groups, func(object interface{}) string {
+			return object.(uaa.Group).Name()
+		})))
 	}
-	d.Set("tags", userProvidedServiceInstance.Tags.Value)
 	return nil
 }
 
-func resourceUserProvidedServiceUpdate(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
+func resourceUserUpdate(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
 	session := meta.(*managers.Session)
 
-	name := d.Get("name").(string)
-	syslogDrainURL := d.Get("syslog_drain_url").(string)
-	routeServiceURL := d.Get("route_service_url").(string)
-	// should be removed when syslogDrainURL and routeServiceURL will be removed
-	if syslogDrainURL == "" {
-		syslogDrainURL = d.Get("syslogDrainURL").(string)
-	}
-	if routeServiceURL == "" {
-		routeServiceURL = d.Get("routeServiceURL").(string)
+	id := d.Id()
+	umuaa := session.ClientUAA
+
+	if !d.IsNewResource() {
+
+		updateUserDetail := false
+		name := d.Get("name").(string)
+		if d.HasChange("name") {
+			updateUserDetail = true
+		}
+		givenName := d.Get("given_name").(string)
+		if d.HasChange("given_name") {
+			updateUserDetail = true
+		}
+		familyName := d.Get("family_name").(string)
+		if d.HasChange("family_name") {
+			updateUserDetail = true
+		}
+
+		var username uaa.UserName
+		if givenName != "" || familyName != "" {
+			username = uaa.UserName{
+				GivenName:  givenName,
+				FamilyName: familyName,
+			}
+		}
+
+		emails := []uaa.Email{
+			{
+				Value:   d.Get("email").(string),
+				Primary: true,
+			},
+		}
+
+		if d.HasChange("email") {
+			updateUserDetail = true
+		}
+
+		if updateUserDetail {
+			_, err := umuaa.UpdateUser(uaa.User{
+				ID:       id,
+				Username: name,
+				Emails:   emails,
+				Name:     username,
+				Origin:   d.Get("origin").(string),
+			})
+			if err != nil {
+				return diag.FromErr(err)
+			}
+		}
+
+		updatePassword, oldPassword, newPassword := getResourceChange("password", d)
+		if updatePassword {
+			err := umuaa.ChangeUserPassword(id, oldPassword, newPassword)
+			if err != nil {
+				return diag.FromErr(err)
+			}
+		}
 	}
 
-	credentials := make(map[string]interface{})
-	if credsJSON, hasJSON := d.GetOk("credentials_json"); hasJSON {
-		err := json.Unmarshal([]byte(credsJSON.(string)), &credentials)
+	old, new := d.GetChange("groups")
+	rolesToDelete, rolesToAdd := getListChanges(old, new)
+
+	for _, r := range rolesToDelete {
+		err := umuaa.DeleteMemberByName(id, r)
 		if err != nil {
 			return diag.FromErr(err)
 		}
-	} else {
-		for k, v := range d.Get("credentials").(map[string]interface{}) {
-			credentials[k] = v.(string)
+	}
+
+	for _, r := range rolesToAdd {
+		err := umuaa.AddMemberByName(id, d.Get("origin").(string), r)
+		if err != nil {
+			return diag.FromErr(err)
 		}
 	}
-	tagsSchema := d.Get("tags").(*schema.Set)
-	tags := make([]string, 0)
-	for _, tag := range tagsSchema.List() {
-		tags = append(tags, tag.(string))
-	}
-
-	_, _, err := session.ClientV3.UpdateUserProvidedServiceInstance(d.Id(), resources.ServiceInstance{
-		Name: name,
-		Tags: types.OptionalStringSlice{
-			IsSet: tags != nil,
-			Value: tags,
-		},
-		RouteServiceURL: types.OptionalString{
-			IsSet: routeServiceURL != "",
-			Value: routeServiceURL,
-		},
-		SyslogDrainURL: types.OptionalString{
-			IsSet: syslogDrainURL != "",
-			Value: syslogDrainURL,
-		},
-		Credentials: types.OptionalObject{
-			IsSet: len(credentials) > 0,
-			Value: credentials,
-		},
-	})
-
-	// log.Printf("updated service instance: %+v", updated)
-	return diag.FromErr(err)
+	return nil
 }
 
-func resourceUserProvidedServiceDelete(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
+func resourceUserDelete(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
 	session := meta.(*managers.Session)
+	id := d.Id()
 
-	// No polling needed since no discussion with service broker
-	_, _, err := session.ClientV3.DeleteServiceInstance(d.Id())
-
+	endpoint := fmt.Sprintf("/v2/users/%s", id)
+	req, err := session.RawClient.NewRequest("DELETE", endpoint, nil)
+	if err != nil {
+		return diag.FromErr(err)
+	}
+	resp, err := session.RawClient.Do(req)
 	if err != nil {
 		return diag.FromErr(err)
 	}
 
+	defer func() {
+		err := resp.Body.Close()
+		if err != nil {
+			log.Printf("[WARN] could not close stream from endpoint: %s", err)
+		}
+	}()
+
+	if resp.StatusCode != 204 {
+		b, err := ioutil.ReadAll(resp.Body)
+		if err != nil {
+			return diag.FromErr(err)
+		}
+		err = ccerror.RawHTTPStatusError{
+			StatusCode:  resp.StatusCode,
+			RawResponse: b,
+		}
+		return diag.FromErr(err)
+	}
+
+	err = session.ClientUAA.DeleteUser(id)
+	if err != nil {
+		return diag.FromErr(err)
+	}
 	return nil
 }

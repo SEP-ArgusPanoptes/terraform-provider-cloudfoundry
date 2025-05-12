@@ -1,39 +1,63 @@
 package cloudfoundry
 
 import (
-	"code.cloudfoundry.org/cli/api/cloudcontroller/ccv2"
-	"code.cloudfoundry.org/cli/api/cloudcontroller/ccv2/constant"
 	"context"
+
+	"code.cloudfoundry.org/cli/api/cloudcontroller/ccv3"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/diag"
 	"github.com/terraform-providers/terraform-provider-cloudfoundry/cloudfoundry/managers"
 
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
 )
 
-func dataSourceOrgQuota() *schema.Resource {
+func dataSourceOrg() *schema.Resource {
+
 	return &schema.Resource{
-		ReadContext: dataSourceOrgQuotaRead,
+
+		ReadContext: dataSourceOrgRead,
+
 		Schema: map[string]*schema.Schema{
+
 			"name": &schema.Schema{
 				Type:     schema.TypeString,
 				Required: true,
 			},
+			labelsKey:      labelsSchema(),
+			annotationsKey: annotationsSchema(),
 		},
 	}
 }
 
-func dataSourceOrgQuotaRead(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
+func dataSourceOrgRead(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
+
 	session := meta.(*managers.Session)
-	qm := session.ClientV2
+	if session == nil {
+		return diag.Errorf("client is nil")
+	}
 
 	name := d.Get("name").(string)
-	quotas, _, err := qm.GetQuotas(constant.OrgQuota, ccv2.FilterByName(name))
+
+	orgs, _, err := session.ClientV3.GetOrganizations(ccv3.Query{
+		Key:    "names",
+		Values: []string{name},
+	})
+
 	if err != nil {
 		return diag.FromErr(err)
 	}
-	if len(quotas) == 0 {
+
+	if len(orgs) == 0 {
 		return diag.FromErr(NotFound)
 	}
-	d.SetId(quotas[0].GUID)
-	return nil
+	if len(orgs) != 1 {
+		return diag.Errorf("Found more than one org")
+	}
+
+	d.SetId(orgs[0].GUID)
+
+	err = metadataRead(orgMetadata, d, meta, true)
+	if err != nil {
+		return diag.FromErr(err)
+	}
+	return diag.FromErr(err)
 }

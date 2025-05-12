@@ -1,243 +1,303 @@
 package cloudfoundry
 
 import (
-	"code.cloudfoundry.org/cli/api/cloudcontroller/ccv2"
-	"code.cloudfoundry.org/cli/api/cloudcontroller/ccv2/constant"
-	"fmt"
-	"github.com/terraform-providers/terraform-provider-cloudfoundry/cloudfoundry/managers"
-	"testing"
+	"context"
+	"encoding/json"
+	"log"
 
-	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/resource"
-	"github.com/hashicorp/terraform-plugin-sdk/v2/terraform"
+	"code.cloudfoundry.org/cli/api/cloudcontroller/ccv3"
+	"code.cloudfoundry.org/cli/resources"
+	"code.cloudfoundry.org/cli/types"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/diag"
+
+	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/structure"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/validation"
+	"github.com/terraform-providers/terraform-provider-cloudfoundry/cloudfoundry/managers"
 )
 
-const userProvidedServiceResourceCreate = `
-resource "cloudfoundry_org" "org1" {
-	name = "organization-one"
-}
+func resourceUserProvidedService() *schema.Resource {
 
-resource "cloudfoundry_space_quota" "dev" {
-	name = "50g"
-	org = "${cloudfoundry_org.org1.id}"
-  allow_paid_service_plans = true
-  instance_memory = 1024
-  total_memory = 51200
-  total_app_instances = 100
-  total_routes = 100
-  total_services = 150
-}
+	return &schema.Resource{
 
-resource "cloudfoundry_space" "space1" {
-	name = "space-one"
-	org = "${cloudfoundry_org.org1.id}"
-	quota = "${cloudfoundry_space_quota.dev.id}"
-	allow_ssh = true
-}
+		CreateContext: resourceUserProvidedServiceCreate,
+		ReadContext:   resourceUserProvidedServiceRead,
+		UpdateContext: resourceUserProvidedServiceUpdate,
+		DeleteContext: resourceUserProvidedServiceDelete,
 
-resource "cloudfoundry_user_provided_service" "mq" {
-	name = "mq"
-  space = "${cloudfoundry_space.space1.id}"
-  credentials = {
-		"url" = "mq://localhost:9000"
-		"username" = "user"
-		"password" = "pwd"
+		Importer: &schema.ResourceImporter{
+			StateContext: schema.ImportStatePassthroughContext,
+		},
+
+		Schema: map[string]*schema.Schema{
+
+			"name": &schema.Schema{
+				Type:     schema.TypeString,
+				Required: true,
+			},
+			"space": &schema.Schema{
+				Type:     schema.TypeString,
+				ForceNew: true,
+				Required: true,
+			},
+			"syslog_drain_url": &schema.Schema{
+				Type:     schema.TypeString,
+				Optional: true,
+				Default:  "",
+			},
+			"syslogDrainURL": &schema.Schema{
+				Type:       schema.TypeString,
+				Optional:   true,
+				Default:    "",
+				Deprecated: "Use syslog_drain_url, Terraform complain about field name may only contain lowercase alphanumeric characters & underscores",
+			},
+			"route_service_url": &schema.Schema{
+				Type:     schema.TypeString,
+				Optional: true,
+				Default:  "",
+			},
+			"routeServiceURL": &schema.Schema{
+				Type:       schema.TypeString,
+				Optional:   true,
+				Default:    "",
+				Deprecated: "Use route_service_url, Terraform complain about field name may only contain lowercase alphanumeric characters & underscores",
+			},
+			"credentials": &schema.Schema{
+				Type:          schema.TypeMap,
+				Optional:      true,
+				Sensitive:     true,
+				ConflictsWith: []string{"credentials_json"},
+			},
+			"credentials_json": &schema.Schema{
+				Type:             schema.TypeString,
+				Optional:         true,
+				ConflictsWith:    []string{"credentials"},
+				Sensitive:        true,
+				DiffSuppressFunc: structure.SuppressJsonDiff,
+				ValidateFunc:     validation.StringIsJSON,
+			},
+			"tags": &schema.Schema{
+				Type:     schema.TypeSet,
+				Optional: true,
+				Elem:     &schema.Schema{Type: schema.TypeString},
+				Set:      schema.HashString,
+			},
+		},
 	}
 }
-`
 
-const userProvidedServiceComplexResourceCreate = `
-resource "cloudfoundry_org" "org1" {
-	name = "organization-one"
-}
+func resourceUserProvidedServiceCreate(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
+	session := meta.(*managers.Session)
 
-resource "cloudfoundry_space" "space1" {
-	name = "space-one"
-	org = "${cloudfoundry_org.org1.id}"
-	allow_ssh = true
-}
+	name := d.Get("name").(string)
+	space := d.Get("space").(string)
+	syslogDrainURL := d.Get("syslog_drain_url").(string)
+	routeServiceURL := d.Get("route_service_url").(string)
 
-resource "cloudfoundry_user_provided_service" "complex" {
-	name = "complex"
-  space = "${cloudfoundry_space.space1.id}"
-  credentials_json = "{ \"cnx\": { \"host\": \"localhost\", \"ports\": [ 8080, 8081, 8082 ] } }"
-}
-`
+	// should be removed when syslogDrainURL and routeServiceURL will be removed
+	if syslogDrainURL == "" {
+		syslogDrainURL = d.Get("syslogDrainURL").(string)
+	}
+	if routeServiceURL == "" {
+		routeServiceURL = d.Get("routeServiceURL").(string)
+	}
+	// credentials := types.OptionalObject{}
 
-const userProvidedServiceResourceUpdate = `
-resource "cloudfoundry_org" "org1" {
-  name = "organization-one"
-}
-
-resource "cloudfoundry_space_quota" "dev" {
-  name = "50g"
-  org = "${cloudfoundry_org.org1.id}"
-  allow_paid_service_plans = true
-  instance_memory = 1024
-  total_memory = 51200
-  total_app_instances = 100
-  total_routes = 100
-  total_services = 150
-}
-
-resource "cloudfoundry_space" "space1" {
-  name = "space-one"
-  org = "${cloudfoundry_org.org1.id}"
-  quota = "${cloudfoundry_space_quota.dev.id}"
-  allow_ssh = true
-}
-
-resource "cloudfoundry_user_provided_service" "mq" {
-  name = "mq"
-  space = "${cloudfoundry_space.space1.id}"
-  credentials = {
-    "url" = "mq://localhost:9000"
-    "username" = "new-user"
-    "password" = "new-pwd"
-  }
-  syslog_drain_url = "http://localhost/syslog"
-  route_service_url = "https://localhost/route"
-}
-`
-
-const userProvidedServiceComplexResourceUpdate = `
-resource "cloudfoundry_org" "org1" {
-  name = "organization-one"
-}
-
-resource "cloudfoundry_space" "space1" {
-  name = "space-one"
-  org = "${cloudfoundry_org.org1.id}"
-  allow_ssh = true
-}
-
-resource "cloudfoundry_user_provided_service" "complex" {
-	name = "complex"
-  space = "${cloudfoundry_space.space1.id}"
-  credentials_json = "{ \"cnx\": { \"host\": \"127.0.0.1\", \"ports\": [ 8088 ] } }"
-  syslog_drain_url = "http://localhost/syslog"
-  route_service_url = "https://localhost/route"
-  tags = ["mytag"]
-}
-`
-
-func TestAccResUserProvidedService_normal(t *testing.T) {
-
-	ref := "cloudfoundry_user_provided_service.mq"
-
-	resource.Test(t,
-		resource.TestCase{
-			PreCheck:          func() { testAccPreCheck(t) },
-			ProviderFactories: testAccProvidersFactories,
-			CheckDestroy:      testAccCheckUserProvidedServiceDestroyed("mq", "cloudfoundry_space.space1"),
-			Steps: []resource.TestStep{
-
-				resource.TestStep{
-					Config: userProvidedServiceResourceCreate,
-					Check: resource.ComposeTestCheckFunc(
-						testAccCheckUserProvidedServiceExists(ref),
-						resource.TestCheckResourceAttr(ref, "name", "mq"),
-						resource.TestCheckResourceAttr(ref, "credentials.url", "mq://localhost:9000"),
-						resource.TestCheckResourceAttr(ref, "credentials.username", "user"),
-						resource.TestCheckResourceAttr(ref, "credentials.password", "pwd"),
-						resource.TestCheckNoResourceAttr(ref, "syslog_drain_url"),
-						resource.TestCheckNoResourceAttr(ref, "route_service_url"),
-						resource.TestCheckNoResourceAttr(ref, "credentials_json"),
-					),
-				},
-
-				resource.TestStep{
-					Config: userProvidedServiceResourceUpdate,
-					Check: resource.ComposeTestCheckFunc(
-						testAccCheckUserProvidedServiceExists(ref),
-						resource.TestCheckResourceAttr(ref, "name", "mq"),
-						resource.TestCheckResourceAttr(ref, "credentials.url", "mq://localhost:9000"),
-						resource.TestCheckResourceAttr(ref, "credentials.username", "new-user"),
-						resource.TestCheckResourceAttr(ref, "credentials.password", "new-pwd"),
-						resource.TestCheckResourceAttr(ref, "syslog_drain_url", "http://localhost/syslog"),
-						resource.TestCheckResourceAttr(ref, "route_service_url", "https://localhost/route"),
-						resource.TestCheckNoResourceAttr(ref, "credentials_json"),
-					),
-				},
-			},
-		})
-}
-
-func TestAccResUserProvidedService_complex(t *testing.T) {
-	ref := "cloudfoundry_user_provided_service.complex"
-	resource.Test(t,
-		resource.TestCase{
-			PreCheck:          func() { testAccPreCheck(t) },
-			ProviderFactories: testAccProvidersFactories,
-			CheckDestroy:      testAccCheckUserProvidedServiceDestroyed("complex", "cloudfoundry_space.space1"),
-			Steps: []resource.TestStep{
-
-				resource.TestStep{
-					Config: userProvidedServiceComplexResourceCreate,
-					Check: resource.ComposeTestCheckFunc(
-						testAccCheckUserProvidedServiceExists(ref),
-						resource.TestCheckResourceAttr(ref, "name", "complex"),
-						resource.TestCheckResourceAttr(ref, "credentials_json", `{ "cnx": { "host": "localhost", "ports": [ 8080, 8081, 8082 ] } }`),
-						resource.TestCheckNoResourceAttr(ref, "syslog_drain_url"),
-						resource.TestCheckNoResourceAttr(ref, "route_service_url"),
-						resource.TestCheckNoResourceAttr(ref, "credentials"),
-					),
-				},
-
-				resource.TestStep{
-					Config: userProvidedServiceComplexResourceUpdate,
-					Check: resource.ComposeTestCheckFunc(
-						testAccCheckUserProvidedServiceExists(ref),
-						resource.TestCheckResourceAttr(ref, "name", "complex"),
-						resource.TestCheckResourceAttr(ref, "credentials_json", `{ "cnx": { "host": "127.0.0.1", "ports": [ 8088 ] } }`),
-						resource.TestCheckResourceAttr(ref, "syslog_drain_url", "http://localhost/syslog"),
-						resource.TestCheckResourceAttr(ref, "route_service_url", "https://localhost/route"),
-						resource.TestCheckNoResourceAttr(ref, "credentials"),
-						resource.TestCheckResourceAttr(ref, "tags.#", "1"),
-					),
-				},
-			},
-		})
-}
-
-func testAccCheckUserProvidedServiceExists(resource string) resource.TestCheckFunc {
-
-	return func(s *terraform.State) error {
-
-		session := testAccProvider.Meta().(*managers.Session)
-
-		rs, ok := s.RootModule().Resources[resource]
-		if !ok {
-			return fmt.Errorf("user provided service '%s' not found in terraform state", resource)
-		}
-
-		id := rs.Primary.ID
-
-		_, _, err := session.ClientV2.GetUserProvidedServiceInstance(id)
+	credentials := make(map[string]interface{})
+	if credsJSON, hasJSON := d.GetOk("credentials_json"); hasJSON {
+		err := json.Unmarshal([]byte(credsJSON.(string)), &credentials)
 		if err != nil {
-			return err
+			return diag.FromErr(err)
 		}
+	} else {
+		for k, v := range d.Get("credentials").(map[string]interface{}) {
+			credentials[k] = v.(string)
+		}
+	}
+	credentialsFormat := types.OptionalObject{
+		IsSet: len(credentials) != 0,
+		Value: credentials,
+	}
 
+	tagsSchema := d.Get("tags").(*schema.Set)
+	tags := make([]string, 0)
+	for _, tag := range tagsSchema.List() {
+		tags = append(tags, tag.(string))
+	}
+
+	tagsFormat := types.OptionalStringSlice{
+		IsSet: tags != nil,
+		Value: tags,
+	}
+
+	syslogDrainURLFormat := types.OptionalString{
+		IsSet: syslogDrainURL != "",
+		Value: syslogDrainURL,
+	}
+
+	routeServiceURLFormat := types.OptionalString{
+		IsSet: routeServiceURL != "",
+		Value: routeServiceURL,
+	}
+
+	userProvidedServiceInstance := resources.ServiceInstance{
+		Type:            resources.UserProvidedServiceInstance,
+		Name:            name,
+		SpaceGUID:       space,
+		Credentials:     credentialsFormat,
+		Tags:            tagsFormat,
+		SyslogDrainURL:  syslogDrainURLFormat,
+		RouteServiceURL: routeServiceURLFormat,
+	}
+
+	// log.Printf("SI : %+v", userProvidedServiceInstance)
+	userProvidedSI, _, err := session.ClientV3.CreateUserProvidedServiceInstance(userProvidedServiceInstance)
+	// log.Printf("Created SI : %+v", userProvidedSI)
+	if err != nil {
+		return diag.FromErr(err)
+	}
+
+	if err != nil {
+		return diag.FromErr(err)
+	}
+
+	d.SetId(userProvidedSI.GUID)
+	return nil
+}
+
+func resourceUserProvidedServiceRead(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
+	var userProvidedServiceInstance resources.ServiceInstance
+
+	session := meta.(*managers.Session)
+	GUID := d.Id()
+	userProvidedServiceInstances, _, _, err := session.ClientV3.GetServiceInstances(ccv3.Query{
+		Key:    ccv3.GUIDFilter,
+		Values: []string{GUID},
+	})
+
+	if err != nil {
+		return diag.FromErr(err)
+	}
+
+	if len(userProvidedServiceInstances) == 0 {
+		d.SetId("")
 		return nil
 	}
+
+	userProvidedServiceInstance = userProvidedServiceInstances[0]
+
+	d.Set("name", userProvidedServiceInstance.Name)
+	d.Set("space", userProvidedServiceInstance.SpaceGUID)
+
+	syslogSet := false
+	syslogDrainURL := userProvidedServiceInstance.SyslogDrainURL.String()
+	if _, ok := d.GetOk("syslogDrainURL"); ok {
+		d.Set("syslogDrainURL", syslogDrainURL)
+		syslogSet = true
+	}
+	if _, ok := d.GetOk("syslog_drain_url"); ok {
+		d.Set("syslog_drain_url", syslogDrainURL)
+		syslogSet = true
+	}
+
+	if !syslogSet && syslogDrainURL != "" {
+		d.Set("syslog_drain_url", syslogDrainURL)
+	}
+
+	routeServiceSet := false
+	routeServiceURL := userProvidedServiceInstance.RouteServiceURL.String()
+	if _, ok := d.GetOk("routeServiceURL"); ok {
+		d.Set("routeServiceURL", routeServiceURL)
+		routeServiceSet = true
+	}
+	if _, ok := d.GetOk("route_service_url"); ok {
+		d.Set("route_service_url", routeServiceURL)
+		routeServiceSet = true
+	}
+	if !routeServiceSet && routeServiceURL != "" {
+		d.Set("route_service_url", routeServiceURL)
+	}
+
+	credentials, _, err := session.ClientV3.GetUserProvidedServiceInstanceCredentails(d.Id())
+	if err != nil {
+		return diag.FromErr(err)
+	}
+
+	if _, hasJSON := d.GetOk("credentials_json"); hasJSON {
+		bytes, _ := json.Marshal(credentials)
+		log.Printf("Creds : %s //// state: %s", string(bytes), d.Get("credentials_json"))
+		d.Set("credentials_json", string(bytes))
+	} else {
+		d.Set("credentials", credentials)
+	}
+	d.Set("tags", userProvidedServiceInstance.Tags.Value)
+	return nil
 }
 
-func testAccCheckUserProvidedServiceDestroyed(name string, spaceResource string) resource.TestCheckFunc {
+func resourceUserProvidedServiceUpdate(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
+	session := meta.(*managers.Session)
 
-	return func(s *terraform.State) error {
-
-		session := testAccProvider.Meta().(*managers.Session)
-
-		rs, ok := s.RootModule().Resources[spaceResource]
-		if !ok {
-			return fmt.Errorf("space '%s' not found in terraform state", spaceResource)
-		}
-		svcs, _, err := session.ClientV2.GetServiceInstances(ccv2.FilterByName(name), ccv2.FilterEqual(constant.SpaceGUIDFilter, rs.Primary.ID))
-		if err != nil {
-			return err
-		}
-		if len(svcs) > 0 {
-			return fmt.Errorf("user provided service with name '%s' still exists in cloud foundry", name)
-		}
-		return nil
+	name := d.Get("name").(string)
+	syslogDrainURL := d.Get("syslog_drain_url").(string)
+	routeServiceURL := d.Get("route_service_url").(string)
+	// should be removed when syslogDrainURL and routeServiceURL will be removed
+	if syslogDrainURL == "" {
+		syslogDrainURL = d.Get("syslogDrainURL").(string)
 	}
+	if routeServiceURL == "" {
+		routeServiceURL = d.Get("routeServiceURL").(string)
+	}
+
+	credentials := make(map[string]interface{})
+	if credsJSON, hasJSON := d.GetOk("credentials_json"); hasJSON {
+		err := json.Unmarshal([]byte(credsJSON.(string)), &credentials)
+		if err != nil {
+			return diag.FromErr(err)
+		}
+	} else {
+		for k, v := range d.Get("credentials").(map[string]interface{}) {
+			credentials[k] = v.(string)
+		}
+	}
+	tagsSchema := d.Get("tags").(*schema.Set)
+	tags := make([]string, 0)
+	for _, tag := range tagsSchema.List() {
+		tags = append(tags, tag.(string))
+	}
+
+	_, _, err := session.ClientV3.UpdateUserProvidedServiceInstance(d.Id(), resources.ServiceInstance{
+		Name: name,
+		Tags: types.OptionalStringSlice{
+			IsSet: tags != nil,
+			Value: tags,
+		},
+		RouteServiceURL: types.OptionalString{
+			IsSet: routeServiceURL != "",
+			Value: routeServiceURL,
+		},
+		SyslogDrainURL: types.OptionalString{
+			IsSet: syslogDrainURL != "",
+			Value: syslogDrainURL,
+		},
+		Credentials: types.OptionalObject{
+			IsSet: len(credentials) > 0,
+			Value: credentials,
+		},
+	})
+
+	// log.Printf("updated service instance: %+v", updated)
+	return diag.FromErr(err)
+}
+
+func resourceUserProvidedServiceDelete(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
+	session := meta.(*managers.Session)
+
+	// No polling needed since no discussion with service broker
+	_, _, err := session.ClientV3.DeleteServiceInstance(d.Id())
+
+	if err != nil {
+		return diag.FromErr(err)
+	}
+
+	return nil
 }

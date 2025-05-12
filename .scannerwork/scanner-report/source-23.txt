@@ -1,48 +1,39 @@
 package cloudfoundry
 
 import (
-	"code.cloudfoundry.org/cli/api/cloudcontroller/ccv3"
-	"context"
-	"github.com/hashicorp/terraform-plugin-sdk/v2/diag"
-	"github.com/terraform-providers/terraform-provider-cloudfoundry/cloudfoundry/managers"
+	"testing"
 
-	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/resource"
 )
 
-func dataSourceIsolationSegment() *schema.Resource {
+const infoDataResource = `
 
-	return &schema.Resource{
+data "cloudfoundry_info" "info" {}
+`
 
-		ReadContext: dataSourceIsolationSegmentRead,
+func TestAccDataSourceInfo_normal(t *testing.T) {
 
-		Schema: map[string]*schema.Schema{
-			"name": &schema.Schema{
-				Type:     schema.TypeString,
-				Required: true,
+	ref := "data.cloudfoundry_info.info"
+
+	resource.ParallelTest(t,
+		resource.TestCase{
+			PreCheck:          func() { testAccPreCheck(t) },
+			ProviderFactories: testAccProvidersFactories,
+			Steps: []resource.TestStep{
+
+				resource.TestStep{
+					Config: infoDataResource,
+					Check: resource.ComposeTestCheckFunc(
+						resource.TestCheckResourceAttr(
+							ref, "auth_endpoint", "https://login."+defaultSysDomain()),
+						resource.TestCheckResourceAttr(
+							ref, "uaa_endpoint", "https://uaa."+defaultSysDomain()),
+						resource.TestCheckResourceAttr(
+							ref, "logging_endpoint", "wss://loggregator."+defaultSysDomain()+":443"),
+						resource.TestCheckResourceAttr(
+							ref, "doppler_endpoint", "wss://doppler."+defaultSysDomain()+":443"),
+					),
+				},
 			},
-			labelsKey:      labelsSchema(),
-			annotationsKey: annotationsSchema(),
-		},
-	}
-}
-
-func dataSourceIsolationSegmentRead(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
-	session := meta.(*managers.Session)
-
-	segments, _, err := session.ClientV3.GetIsolationSegments(ccv3.Query{
-		Key:    ccv3.NameFilter,
-		Values: []string{d.Get("name").(string)},
-	})
-	if err != nil {
-		return diag.FromErr(err)
-	}
-	if len(segments) == 0 {
-		return diag.FromErr(NotFound)
-	}
-	d.SetId(segments[0].GUID)
-	err = metadataRead(segmentMetadata, d, meta, true)
-	if err != nil {
-		return diag.FromErr(err)
-	}
-	return nil
+		})
 }

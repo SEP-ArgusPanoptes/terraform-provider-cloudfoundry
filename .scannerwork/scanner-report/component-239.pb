@@ -1,1 +1,0 @@
-ï Xhrsonar-project.properties

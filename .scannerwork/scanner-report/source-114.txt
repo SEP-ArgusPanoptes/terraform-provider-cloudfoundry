@@ -1,168 +1,167 @@
 package cloudfoundry
 
 import (
+	"fmt"
+	"path/filepath"
+	"testing"
+
 	"code.cloudfoundry.org/cli/api/cloudcontroller/ccv2"
-	"context"
-	"github.com/hashicorp/terraform-plugin-sdk/v2/diag"
 	"github.com/terraform-providers/terraform-provider-cloudfoundry/cloudfoundry/managers"
 
-	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/resource"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/terraform"
 )
 
-func resourceDefaultAsg() *schema.Resource {
+const buildpackResource = `
+resource "cloudfoundry_buildpack" "tomee" {
 
-	return &schema.Resource{
+	name = "tomee-buildpack-res"
 
-		CreateContext: resourceDefaultAsgCreate,
-		ReadContext:   resourceDefaultAsgRead,
-		UpdateContext: resourceDefaultAsgUpdate,
-		DeleteContext: resourceDefaultAsgDelete,
+	path = "https://github.com/cloudfoundry-community/tomee-buildpack/releases/download/v4.3/tomee-buildpack-v4.3.zip"
+}
+`
 
-		Importer: &schema.ResourceImporter{
-			StateContext: func(ctx context.Context, d *schema.ResourceData, meta interface{}) ([]*schema.ResourceData, error) {
-				d.Set("name", d.Id())
-				return ImportReadContext(resourceDefaultAsgRead)(ctx, d, meta)
+const buildpackResourceUpdate1 = `
+
+resource "cloudfoundry_buildpack" "tomee" {
+
+	name = "tomee-buildpack-res"
+	position = 5
+	enabled = false
+	locked = true
+
+	path = "https://github.com/cloudfoundry-community/tomee-buildpack/releases/download/v4.3/tomee-buildpack-v4.3.zip"
+}
+`
+
+const buildpackResourceUpdate2 = `
+
+resource "cloudfoundry_buildpack" "tomee" {
+
+	name = "tomee-buildpack-res"
+	position = 5
+	enabled = true
+	locked = false
+
+	path = "%s"
+}
+`
+
+func TestAccResBuildpack_normal(t *testing.T) {
+
+	fixturesBp := asset("buildpacks")
+	refBuildpack := "cloudfoundry_buildpack.tomee"
+
+	resource.ParallelTest(t,
+		resource.TestCase{
+			PreCheck:          func() { testAccPreCheck(t) },
+			ProviderFactories: testAccProvidersFactories,
+			CheckDestroy:      testAccCheckBuildpackDestroyed("tomee-buildpack-res"),
+			Steps: []resource.TestStep{
+
+				resource.TestStep{
+					Config: buildpackResource,
+					Check: resource.ComposeTestCheckFunc(
+						testAccCheckBuildpackExists(refBuildpack, "tomee-buildpack-v4.3.zip"),
+						resource.TestCheckResourceAttr(
+							refBuildpack, "name", "tomee-buildpack-res"),
+						resource.TestCheckResourceAttr(
+							refBuildpack, "position", "1"),
+						resource.TestCheckResourceAttr(
+							refBuildpack, "enabled", "true"),
+						resource.TestCheckResourceAttr(
+							refBuildpack, "locked", "false"),
+					),
+				},
+				resource.TestStep{
+					ResourceName:            refBuildpack,
+					ImportState:             true,
+					ImportStateVerify:       true,
+					ImportStateVerifyIgnore: []string{"path"},
+				},
+				resource.TestStep{
+					Config: buildpackResourceUpdate1,
+					Check: resource.ComposeTestCheckFunc(
+						testAccCheckBuildpackExists(refBuildpack, "tomee-buildpack-v4.3.zip"),
+						resource.TestCheckResourceAttr(
+							refBuildpack, "name", "tomee-buildpack-res"),
+						resource.TestCheckResourceAttr(
+							refBuildpack, "position", "5"),
+						resource.TestCheckResourceAttr(
+							refBuildpack, "enabled", "false"),
+						resource.TestCheckResourceAttr(
+							refBuildpack, "locked", "true"),
+					),
+				},
+
+				resource.TestStep{
+					Config: fmt.Sprintf(buildpackResourceUpdate2, filepath.Join(fixturesBp, "tomee-buildpack-v4.5.2.zip")),
+					Check: resource.ComposeTestCheckFunc(
+						testAccCheckBuildpackExists(refBuildpack, "tomee-buildpack-v4.5.2.zip"),
+						resource.TestCheckResourceAttr(
+							refBuildpack, "name", "tomee-buildpack-res"),
+						resource.TestCheckResourceAttr(
+							refBuildpack, "position", "5"),
+						resource.TestCheckResourceAttr(
+							refBuildpack, "enabled", "true"),
+						resource.TestCheckResourceAttr(
+							refBuildpack, "locked", "false"),
+					),
+				},
 			},
-		},
-
-		Schema: map[string]*schema.Schema{
-
-			"name": &schema.Schema{
-				Type:         schema.TypeString,
-				Required:     true,
-				ForceNew:     true,
-				ValidateFunc: validateDefaultRunningStagingName,
-			},
-			"asgs": &schema.Schema{
-				Type:     schema.TypeSet,
-				Required: true,
-				Elem:     &schema.Schema{Type: schema.TypeString},
-				Set:      resourceStringHash,
-			},
-		},
-	}
+		})
 }
 
-func resourceDefaultAsgCreate(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
+func testAccCheckBuildpackExists(refBuildpack, bpFilename string) resource.TestCheckFunc {
 
-	session := meta.(*managers.Session)
-	name := d.Get("name").(string)
-	asgs := d.Get("asgs").(*schema.Set).List()
+	return func(s *terraform.State) error {
 
-	am := session.ClientV2
-	switch name {
-	case AppStatusRunning:
-		for _, g := range asgs {
-			_, err := am.BindRunningSecurityGroup(g.(string))
-			if err != nil {
-				return diag.FromErr(err)
-			}
+		session := testAccProvider.Meta().(*managers.Session)
+
+		rs, ok := s.RootModule().Resources[refBuildpack]
+		if !ok {
+			return fmt.Errorf("buildpack resource '%s' not found in terraform state", refBuildpack)
 		}
-	case AppStatusStaging:
-		for _, g := range asgs {
-			_, err := am.BindStagingSecurityGroup(g.(string))
-			if err != nil {
-				return diag.FromErr(err)
-			}
-		}
-	default:
-		return diag.Errorf("default security group name must be one of 'running' or 'staging'")
-	}
-	d.SetId(name)
 
-	return nil
-}
+		id := rs.Primary.ID
+		attributes := rs.Primary.Attributes
 
-func resourceDefaultAsgRead(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
-
-	session := meta.(*managers.Session)
-	var asgs []ccv2.SecurityGroup
-	var err error
-	am := session.ClientV2
-	tfAsgs := d.Get("asgs").(*schema.Set).List()
-	switch d.Get("name").(string) {
-	case AppStatusRunning:
-		asgs, _, err = am.GetRunningSecurityGroups()
+		bp, _, err := session.ClientV2.GetBuildpack(id)
 		if err != nil {
-			return diag.FromErr(err)
+			return err
 		}
-	case AppStatusStaging:
-		asgs, _, err = am.GetStagingSecurityGroups()
+
+		if err := assertEquals(attributes, "name", bp.Name); err != nil {
+			return err
+		}
+		if err := assertEquals(attributes, "position", bp.Position.Value); err != nil {
+			return err
+		}
+		if err := assertEquals(attributes, "locked", bp.Locked.Value); err != nil {
+			return err
+		}
+		if err := assertEquals(attributes, "enabled", bp.Enabled.Value); err != nil {
+			return err
+		}
+		if bp.Filename != bpFilename {
+			return fmt.Errorf("expected buildpack file name to be '%s' but it was '%s'", bpFilename, bp.Filename)
+		}
+		return nil
+	}
+}
+
+func testAccCheckBuildpackDestroyed(buildpackName string) resource.TestCheckFunc {
+
+	return func(s *terraform.State) error {
+
+		session := testAccProvider.Meta().(*managers.Session)
+		bps, _, err := session.ClientV2.GetBuildpacks(ccv2.FilterByName(buildpackName))
 		if err != nil {
-			return diag.FromErr(err)
+			return err
 		}
+		if len(bps) > 0 {
+			return fmt.Errorf("buildpack with name '%s' still exists in cloud foundry", buildpackName)
+		}
+		return nil
 	}
-
-	finalTfAsgs := intersectSlices(tfAsgs, asgs, func(src, item interface{}) bool {
-		return src.(string) == item.(ccv2.SecurityGroup).GUID
-	})
-	if IsImportState(d) && len(finalTfAsgs) == 0 {
-		for _, asg := range asgs {
-			finalTfAsgs = append(finalTfAsgs, asg.GUID)
-		}
-	}
-	d.Set("asgs", schema.NewSet(resourceStringHash, finalTfAsgs))
-	return nil
-}
-
-func resourceDefaultAsgUpdate(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
-
-	session := meta.(*managers.Session)
-
-	secGroupToDelete, secGroupToAdd := getListChanges(d.GetChange("asgs"))
-	am := session.ClientV2
-	switch d.Get("name").(string) {
-	case AppStatusRunning:
-		for _, secGroup := range secGroupToAdd {
-			_, err := am.BindRunningSecurityGroup(secGroup)
-			if err != nil {
-				return diag.FromErr(err)
-			}
-		}
-		for _, secGroup := range secGroupToDelete {
-			_, err := am.UnbindRunningSecurityGroup(secGroup)
-			if err != nil {
-				return diag.FromErr(err)
-			}
-		}
-	case AppStatusStaging:
-		for _, secGroup := range secGroupToAdd {
-			_, err := am.BindStagingSecurityGroup(secGroup)
-			if err != nil {
-				return diag.FromErr(err)
-			}
-		}
-		for _, secGroup := range secGroupToDelete {
-			_, err := am.UnbindStagingSecurityGroup(secGroup)
-			if err != nil {
-				return diag.FromErr(err)
-			}
-		}
-	}
-	return nil
-}
-
-func resourceDefaultAsgDelete(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
-	session := meta.(*managers.Session)
-
-	am := session.ClientV2
-	tfAsgs := d.Get("asgs").(*schema.Set).List()
-
-	switch d.Get("name").(string) {
-	case AppStatusRunning:
-		for _, asg := range tfAsgs {
-			_, err := am.UnbindRunningSecurityGroup(asg.(string))
-			if err != nil {
-				return diag.FromErr(err)
-			}
-		}
-	case AppStatusStaging:
-		for _, asg := range tfAsgs {
-			_, err := am.UnbindStagingSecurityGroup(asg.(string))
-			if err != nil {
-				return diag.FromErr(err)
-			}
-		}
-	}
-	return nil
 }

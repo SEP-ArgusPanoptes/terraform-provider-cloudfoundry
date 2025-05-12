@@ -2,74 +2,75 @@ package cloudfoundry
 
 import (
 	"code.cloudfoundry.org/cli/api/cloudcontroller/ccv2"
-	"context"
-	"github.com/hashicorp/terraform-plugin-sdk/v2/diag"
-	"strings"
-
+	"fmt"
 	"github.com/terraform-providers/terraform-provider-cloudfoundry/cloudfoundry/managers"
+	"testing"
 
-	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/resource"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/terraform"
 )
 
-func dataSourceUser() *schema.Resource {
+const stackDataResource = `
 
-	return &schema.Resource{
+data "cloudfoundry_stack" "s" {
+    name = "%s"
+}
+`
 
-		ReadContext: dataSourceUserRead,
-
-		Schema: map[string]*schema.Schema{
-
-			"name": &schema.Schema{
-				Type:     schema.TypeString,
-				Required: true,
-			},
-			"org_id": &schema.Schema{
-				Type:        schema.TypeString,
-				Description: "Optionally scope the lookup to organization",
-				Optional:    true,
-			},
-		},
+func TestAccDataSourceStack_normal(t *testing.T) {
+	defaultStacks, _, err := testSession().ClientV2.GetStacks()
+	if err != nil {
+		panic(err)
 	}
+	ref := "data.cloudfoundry_stack.s"
+
+	resource.ParallelTest(t,
+		resource.TestCase{
+			PreCheck:          func() { testAccPreCheck(t) },
+			ProviderFactories: testAccProvidersFactories,
+			Steps: []resource.TestStep{
+
+				resource.TestStep{
+					Config: fmt.Sprintf(stackDataResource, defaultStacks[0].Name),
+					Check: resource.ComposeTestCheckFunc(
+						checkDataSourceStackExists(ref),
+						resource.TestCheckResourceAttr(
+							ref, "name", defaultStacks[0].Name),
+					),
+				},
+			},
+		})
 }
 
-func dataSourceUserRead(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
+func checkDataSourceStackExists(resource string) resource.TestCheckFunc {
 
-	session := meta.(*managers.Session)
-	um := session.ClientV2
+	return func(s *terraform.State) error {
 
-	name := strings.ToLower(d.Get("name").(string))
+		session := testAccProvider.Meta().(*managers.Session)
 
-	users, _, err := um.GetUsers()
-	isNotAuthorized := IsErrNotAuthorized(err)
-	if err != nil && !isNotAuthorized {
-		return diag.FromErr(err)
-	}
-	if isNotAuthorized { // Fallback for OrgManagers
-		orgID := d.Get("org_id").(string)
-		if orgID == "" {
-			return diag.FromErr(err)
+		rs, ok := s.RootModule().Resources[resource]
+		if !ok {
+			return fmt.Errorf("stack '%s' not found in terraform state", resource)
 		}
-		users, _, err := um.GetOrganizationUsers(orgID)
+
+		id := rs.Primary.ID
+		name := rs.Primary.Attributes["name"]
+		description := rs.Primary.Attributes["description"]
+
+		stacks, _, err := session.ClientV2.GetStacks(ccv2.FilterByName(name))
 		if err != nil {
-			return diag.FromErr(err)
+			return err
 		}
-		if isInSlice(users, func(object interface{}) bool {
-			if user, ok := object.(ccv2.User); ok && user.Username == name {
-				d.SetId(user.GUID)
-				return true
-			}
-			return false
-		}) {
-			return nil
+		if len(stacks) == 0 {
+			return NotFound
 		}
-		return diag.FromErr(NotFound)
-	}
+		if err := assertSame(id, stacks[0].GUID); err != nil {
+			return err
+		}
+		if err := assertSame(description, stacks[0].Description); err != nil {
+			return err
+		}
 
-	for _, user := range users {
-		if strings.ToLower(user.Username) == name {
-			d.SetId(user.GUID)
-			return nil
-		}
+		return nil
 	}
-	return diag.FromErr(NotFound)
 }

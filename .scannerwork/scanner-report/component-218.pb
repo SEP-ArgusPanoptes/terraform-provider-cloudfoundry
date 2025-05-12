@@ -1,1 +1,1 @@
-Ú 2	terraformX1hrexamples/ldap/org2.tf
+Ú 2	terraformX1hrexamples/ldap/org1.tf

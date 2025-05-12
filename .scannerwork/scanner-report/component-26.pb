@@ -1,1 +1,1 @@
- 2goX(hr(cloudfoundry/data_source_cf_org_quota.go
+ 2goX@hr"cloudfoundry/data_source_cf_org.go

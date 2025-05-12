@@ -1,69 +1,75 @@
 package cloudfoundry
 
 import (
-	"context"
-	"github.com/hashicorp/terraform-plugin-sdk/v2/diag"
-	"github.com/terraform-providers/terraform-provider-cloudfoundry/cloudfoundry/managers"
+	"fmt"
 	"strings"
+	"testing"
 
-	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/resource"
 )
 
-func dataSourceInfo() *schema.Resource {
+const domainDataResource = `
+data "cloudfoundry_domain" "my-domain" {
+    name = "%s"
+}
+`
 
-	return &schema.Resource{
-
-		ReadContext: dataSourceInfoRead,
-
-		Schema: map[string]*schema.Schema{
-			"api_version": &schema.Schema{
-				Type:     schema.TypeString,
-				Computed: true,
-			},
-			"auth_endpoint": &schema.Schema{
-				Type:     schema.TypeString,
-				Computed: true,
-			},
-			"uaa_endpoint": &schema.Schema{
-				Type:     schema.TypeString,
-				Computed: true,
-			},
-			"routing_endpoint": &schema.Schema{
-				Type:     schema.TypeString,
-				Computed: true,
-			},
-			"logging_endpoint": &schema.Schema{
-				Type:       schema.TypeString,
-				Computed:   true,
-				Deprecated: "Not exists anymore in new cloud foundry",
-			},
-			"doppler_endpoint": &schema.Schema{
-				Type:     schema.TypeString,
-				Computed: true,
-			},
-		},
-	}
+const privateDomainDataResource = `
+resource "cloudfoundry_org" "myorg" {
+	name = "myorg-ds-domain"
 }
 
-func dataSourceInfoRead(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
+resource "cloudfoundry_domain" "mydomain" {
+  sub_domain = "private-ds-domain"
+  domain     = "%[1]s"
+  org = "${cloudfoundry_org.myorg.id}"
+}
 
-	session := meta.(*managers.Session)
-	if session == nil {
-		return diag.Errorf("client is nil")
-	}
+data "cloudfoundry_domain" "private" {
+  domain = "${cloudfoundry_domain.mydomain.domain}"
+  sub_domain = "private-ds-domain"
+}
+`
 
-	info := session.ClientV3.Info
-	infoV2, _, err := session.ClientV2.Info()
-	if err != nil {
-		return diag.FromErr(err)
-	}
-	d.Set("api_version", info.CloudControllerAPIVersion())
-	d.Set("auth_endpoint", infoV2.AuthorizationEndpoint)
-	d.Set("uaa_endpoint", info.UAA())
-	d.Set("routing_endpoint", info.Routing())
-	d.Set("logging_endpoint", strings.Replace(info.Logging(), "doppler", "loggregator", 1))
-	d.Set("doppler_endpoint", info.Logging())
+func TestAccDataSourceDomain_normal(t *testing.T) {
 
-	d.SetId("info")
-	return nil
+	domain := strings.Join(strings.Split(defaultAppDomain(), ".")[1:], ".")
+	ref := "data.cloudfoundry_domain.my-domain"
+
+	resource.ParallelTest(t,
+		resource.TestCase{
+			PreCheck:          func() { testAccPreCheck(t) },
+			ProviderFactories: testAccProvidersFactories,
+			Steps: []resource.TestStep{
+
+				resource.TestStep{
+					Config: fmt.Sprintf(domainDataResource, domain),
+					Check: resource.ComposeTestCheckFunc(
+						resource.TestCheckResourceAttr(
+							ref, "name", domain),
+						resource.TestCheckResourceAttr(
+							ref, "domain", strings.SplitN(domain, ".", 2)[1]),
+					),
+				},
+			},
+		})
+}
+
+func TestAccDataSourceDomain_private(t *testing.T) {
+	ref := "data.cloudfoundry_domain.private"
+	resource.ParallelTest(t,
+		resource.TestCase{
+			PreCheck:          func() { testAccPreCheck(t) },
+			ProviderFactories: testAccProvidersFactories,
+			Steps: []resource.TestStep{
+				resource.TestStep{
+					Config: fmt.Sprintf(privateDomainDataResource, defaultAppDomain()),
+					Check: resource.ComposeTestCheckFunc(
+						resource.TestCheckResourceAttr(ref, "name", "private-ds-domain."+defaultAppDomain()),
+						resource.TestCheckResourceAttr(ref, "sub_domain", "private-ds-domain"),
+						resource.TestCheckResourceAttr(ref, "domain", defaultAppDomain()),
+					),
+				},
+			},
+		})
 }

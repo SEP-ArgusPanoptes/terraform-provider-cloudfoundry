@@ -1,1 +1,1 @@
-Ž 2goX*hr4cloudfoundry/resource_cf_service_instance_migrate.go
+Ž 2goXõhr,cloudfoundry/resource_cf_service_instance.go

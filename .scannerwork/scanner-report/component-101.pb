@@ -1,1 +1,1 @@
-e 2goX³hrcloudfoundry/provider.go
+e 2goXÖhrcloudfoundry/migrate_bits.go

@@ -1,32 +1,38 @@
 package cloudfoundry
 
 import (
-	"context"
 	"fmt"
-	"github.com/terraform-providers/terraform-provider-cloudfoundry/cloudfoundry/managers"
+	"testing"
 
-	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/resource"
 )
 
-func resourceServicePlanAccessImport(ctx context.Context, d *schema.ResourceData, meta interface{}) ([]*schema.ResourceData, error) {
-	session := meta.(*managers.Session)
-	if session == nil {
-		return []*schema.ResourceData{}, fmt.Errorf("client is nil")
-	}
+func TestAccServiceKey_importBasic(t *testing.T) {
+	spaceId, _ := defaultTestSpace(t)
+	serviceName1, _, servicePlan := getTestServiceBrokers(t)
 
-	spV, _, err := session.ClientV2.GetServicePlanVisibility(d.Id())
-	if err == nil {
-		d.Set("plan", spV.ServicePlanGUID)
-		d.Set("org", spV.OrganizationGUID)
-		return ImportReadContext(resourceServicePlanAccessRead)(ctx, d, meta)
-	}
+	resourceName := "cloudfoundry_service_key.test-service-instance-key"
 
-	plan, _, err := session.ClientV2.GetServicePlan(d.Id())
-	if err == nil {
-		d.Set("plan", d.Id())
-		d.Set("public", plan.Public)
-		return ImportReadContext(resourceServicePlanAccessRead)(ctx, d, meta)
-	}
+	resource.Test(t,
+		resource.TestCase{
+			PreCheck:          func() { testAccPreCheck(t) },
+			ProviderFactories: testAccProvidersFactories,
+			CheckDestroy: testAccCheckServiceKeyDestroyed(
+				"test-service-instance-key",
+				"cloudfoundry_service_instance.test-service-instance"),
+			Steps: []resource.TestStep{
 
-	return []*schema.ResourceData{}, fmt.Errorf("unable to find service_plan_visibilities nor service plan for id '%s'", d.Id())
+				resource.TestStep{
+					Config: fmt.Sprintf(serviceKeyResource,
+						serviceName1, spaceId, servicePlan),
+				},
+
+				resource.TestStep{
+					ResourceName:            resourceName,
+					ImportState:             true,
+					ImportStateVerify:       true,
+					ImportStateVerifyIgnore: []string{"params"},
+				},
+			},
+		})
 }

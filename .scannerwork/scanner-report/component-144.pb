@@ -1,1 +1,1 @@
- 2goXöhr'cloudfoundry/resource_cf_service_key.go
+ 2goX¨hr1cloudfoundry/resource_cf_service_instance_test.go

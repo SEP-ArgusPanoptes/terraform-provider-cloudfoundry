@@ -1,1 +1,1 @@
-s 2goXùhr,cloudfoundry/resource_cf_default_asg_test.go
+s 2goX©hr'cloudfoundry/resource_cf_default_asg.go

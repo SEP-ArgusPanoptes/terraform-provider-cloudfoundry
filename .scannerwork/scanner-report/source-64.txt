@@ -1,27 +1,32 @@
-package appdeployers
+package cloudfoundry
 
 import (
-	"time"
+	"testing"
 
-	"code.cloudfoundry.org/cli/api/cloudcontroller/ccv2"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/resource"
 )
 
-type AppDeploy struct {
-	App             ccv2.Application
-	Mappings        []ccv2.RouteMapping
-	ServiceBindings []ccv2.ServiceBinding
-	Path            string
-	BindTimeout     time.Duration
-	StageTimeout    time.Duration
-	StartTimeout    time.Duration
-}
+func TestAccUser_WithGroups_importBasic(t *testing.T) {
+	resourceName := "cloudfoundry_user.admin-service-user"
+	username := "cf-admin"
 
-func (a AppDeploy) IsDockerImage() bool {
-	return a.App.DockerImage != ""
-}
+	resource.Test(t,
+		resource.TestCase{
+			PreCheck:          func() { testAccPreCheck(t) },
+			ProviderFactories: testAccProvidersFactories,
+			CheckDestroy:      testAccCheckUserDestroy(username),
+			Steps: []resource.TestStep{
 
-type AppDeployResponse struct {
-	App             ccv2.Application
-	RouteMapping    []ccv2.RouteMapping
-	ServiceBindings []ccv2.ServiceBinding
+				resource.TestStep{
+					Config: userResourceWithGroups,
+				},
+
+				resource.TestStep{
+					ResourceName:            resourceName,
+					ImportState:             true,
+					ImportStateVerify:       true,
+					ImportStateVerifyIgnore: []string{"password"},
+				},
+			},
+		})
 }

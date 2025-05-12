@@ -1,88 +1,48 @@
 package cloudfoundry
 
 import (
-	"code.cloudfoundry.org/cli/api/cloudcontroller/ccv2"
 	"code.cloudfoundry.org/cli/api/cloudcontroller/ccv2/constant"
-	"fmt"
+	"context"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/diag"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
 	"github.com/terraform-providers/terraform-provider-cloudfoundry/cloudfoundry/managers"
-	"os"
-	"path/filepath"
-	"runtime"
-	"testing"
-
-	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/resource"
-	"github.com/hashicorp/terraform-plugin-sdk/v2/terraform"
 )
 
-const spaceQuotaDataResource = `
-
-resource "cloudfoundry_space_quota" "q" {
-  name = "20g-space-ds"
-  allow_paid_service_plans = false
-  instance_memory = 512
-  total_memory = 10240
-  total_app_instances = 10
-  total_routes = 5
-  total_services = 20
-  org = "%s"
-}
-
-data "cloudfoundry_space_quota" "qq" {
-  name = "${cloudfoundry_space_quota.q.name}"
-  org = "%s"
-}
-`
-
-func TestAccDataSourceSpaceQuota_normal(t *testing.T) {
-	_, filename, _, _ := runtime.Caller(0)
-	ut := os.Getenv("UNIT_TEST")
-	if !testAccEnvironmentSet() || (len(ut) > 0 && ut != filepath.Base(filename)) {
-		fmt.Printf("Skipping tests in '%s'.\n", filepath.Base(filename))
-		return
-	}
-
-	ref := "data.cloudfoundry_space_quota.qq"
-	orgID, _ := defaultTestOrg(t)
-
-	resource.ParallelTest(t,
-		resource.TestCase{
-			PreCheck:          func() { testAccPreCheck(t) },
-			ProviderFactories: testAccProvidersFactories,
-			Steps: []resource.TestStep{
-
-				resource.TestStep{
-					Config: fmt.Sprintf(spaceQuotaDataResource, orgID, orgID),
-					Check: resource.ComposeTestCheckFunc(
-						checkDataSourceSpaceQuotaExists(ref),
-						resource.TestCheckResourceAttr(ref, "name", "20g-space-ds"),
-						resource.TestCheckResourceAttr(ref, "org", orgID),
-					),
-				},
+func dataSourceSpaceQuota() *schema.Resource {
+	return &schema.Resource{
+		ReadContext: dataSourceSpaceQuotaRead,
+		Schema: map[string]*schema.Schema{
+			"name": &schema.Schema{
+				Type:     schema.TypeString,
+				Required: true,
 			},
-		})
+			"org": &schema.Schema{
+				Type:     schema.TypeString,
+				Optional: true,
+			},
+		},
+	}
 }
 
-func checkDataSourceSpaceQuotaExists(resource string) resource.TestCheckFunc {
-	return func(s *terraform.State) error {
-		session := testAccProvider.Meta().(*managers.Session)
-		rs, ok := s.RootModule().Resources[resource]
-		if !ok {
-			return fmt.Errorf("quota '%s' not found in terraform state", resource)
-		}
+func dataSourceSpaceQuotaRead(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
+	session := meta.(*managers.Session)
+	qm := session.ClientV2
 
-		id := rs.Primary.ID
-		attributes := rs.Primary.Attributes
-		var (
-			err   error
-			quota ccv2.Quota
-		)
-		quota, _, err = session.ClientV2.GetQuota(constant.SpaceQuota, id)
-		if err != nil {
-			return err
+	name := d.Get("name").(string)
+	orgId := d.Get("org").(string)
+	quotas, _, err := qm.GetQuotas(constant.SpaceQuota)
+	if err != nil {
+		return diag.FromErr(err)
+	}
+	for _, quota := range quotas {
+		if quota.Name != name {
+			continue
 		}
-		if err := assertEquals(attributes, "org", quota.OrganizationGUID); err != nil {
-			return err
+		if orgId != "" && quota.OrganizationGUID != orgId {
+			continue
 		}
+		d.SetId(quota.GUID)
 		return nil
 	}
+	return diag.FromErr(NotFound)
 }

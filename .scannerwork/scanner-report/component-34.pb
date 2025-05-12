@@ -1,1 +1,1 @@
-" 2goXHhr*cloudfoundry/data_source_cf_service_key.go
+" 2goXkhr/cloudfoundry/data_source_cf_service_instance.go

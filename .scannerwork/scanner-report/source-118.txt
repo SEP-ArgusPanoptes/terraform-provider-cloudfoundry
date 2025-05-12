@@ -1,146 +1,229 @@
 package cloudfoundry
 
 import (
-	"context"
-	"github.com/hashicorp/terraform-plugin-sdk/v2/diag"
+	"fmt"
+	"testing"
+
+	"code.cloudfoundry.org/cli/api/cloudcontroller/ccv2"
 	"github.com/terraform-providers/terraform-provider-cloudfoundry/cloudfoundry/managers"
 
-	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/resource"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/terraform"
 )
 
-func resourceEvg() *schema.Resource {
+const domainResourceShared = `
 
-	return &schema.Resource{
+resource "cloudfoundry_domain" "shared" {
+  sub_domain = "dev-res"
+  domain = "%s"
+}
+`
 
-		CreateContext: resourceEvgCreate,
-		ReadContext:   resourceEvgRead,
-		UpdateContext: resourceEvgUpdate,
-		DeleteContext: resourceEvgDelete,
+const domainResourceSharedTCP = `
 
-		Importer: &schema.ResourceImporter{
-			StateContext: func(ctx context.Context, d *schema.ResourceData, meta interface{}) ([]*schema.ResourceData, error) {
-				d.Set("name", d.Id())
-				return ImportReadContext(resourceEvgRead)(ctx, d, meta)
-			},
-		},
-
-		Schema: map[string]*schema.Schema{
-			"name": &schema.Schema{
-				Type:         schema.TypeString,
-				Required:     true,
-				ValidateFunc: validateDefaultRunningStagingName,
-			},
-			"variables": &schema.Schema{
-				Type:     schema.TypeMap,
-				Required: true,
-			},
-		},
-	}
+data "cloudfoundry_router_group" "tcp" {
+  name = "default-tcp"
 }
 
-func resourceEvgCreate(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
+resource "cloudfoundry_domain" "shared-tcp" {
+  sub_domain = "tcp-test-res"
+  domain = "%s"
+  router_group = "${data.cloudfoundry_router_group.tcp.id}"
+}
+`
 
-	if err := resourceEvgUpdate(ctx, d, meta); err != nil {
-		return err
-	}
-	d.SetId(d.Get("name").(string))
-	return nil
+const domainResourcePrivate = `
+
+resource "cloudfoundry_domain" "private" {
+  name = "%s.%s"
+  org = "%s"
+}
+`
+
+func TestAccResSharedDomain_normal(t *testing.T) {
+
+	ref := "cloudfoundry_domain.shared"
+	domainname := "dev-res." + defaultAppDomain()
+
+	resource.ParallelTest(t,
+		resource.TestCase{
+			PreCheck:          func() { testAccPreCheck(t) },
+			ProviderFactories: testAccProvidersFactories,
+			CheckDestroy:      testAccCheckSharedDomainDestroy(domainname),
+			Steps: []resource.TestStep{
+
+				resource.TestStep{
+					Config: fmt.Sprintf(domainResourceShared, defaultAppDomain()),
+					Check: resource.ComposeTestCheckFunc(
+						checkShareDomainExists(ref),
+						resource.TestCheckResourceAttr(
+							ref, "name", domainname),
+						resource.TestCheckResourceAttr(
+							ref, "sub_domain", "dev-res"),
+						resource.TestCheckResourceAttr(
+							ref, "domain", defaultAppDomain()),
+					),
+				},
+				resource.TestStep{
+					ResourceName:      ref,
+					ImportState:       true,
+					ImportStateVerify: true,
+				},
+			},
+		})
 }
 
-func resourceEvgRead(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
-	session := meta.(*managers.Session)
+func TestAccResSharedTCPDomain_normal(t *testing.T) {
 
-	var variables map[string]string
-	var err error
-	switch d.Get("name").(string) {
-	case AppStatusRunning:
-		variables, _, err = session.ClientV2.GetEnvVarGroupRunning()
-	case AppStatusStaging:
-		variables, _, err = session.ClientV2.GetEnvVarGroupStaging()
-	}
-	if err != nil {
-		return diag.FromErr(err)
-	}
-	finalVariables := make(map[string]interface{})
-	tfVariables := d.Get("variables").(map[string]interface{})
-	for tfKey := range tfVariables {
-		if v, ok := variables[tfKey]; ok {
-			finalVariables[tfKey] = v
+	ref := "cloudfoundry_domain.shared-tcp"
+	domainname := "tcp-test-res." + defaultAppDomain()
+
+	resource.ParallelTest(t,
+		resource.TestCase{
+			PreCheck:          func() { testAccPreCheck(t) },
+			ProviderFactories: testAccProvidersFactories,
+			CheckDestroy:      testAccCheckSharedDomainDestroy(domainname),
+			Steps: []resource.TestStep{
+
+				resource.TestStep{
+					Config: fmt.Sprintf(domainResourceSharedTCP, defaultAppDomain()),
+					Check: resource.ComposeTestCheckFunc(
+						checkShareDomainExists(ref),
+						resource.TestCheckResourceAttr(
+							ref, "name", domainname),
+						resource.TestCheckResourceAttr(
+							ref, "sub_domain", "tcp-test-res"),
+						resource.TestCheckResourceAttr(
+							ref, "domain", defaultAppDomain()),
+						resource.TestCheckResourceAttr(
+							ref, "router_type", "tcp"),
+					),
+				},
+			},
+		})
+}
+
+func TestAccResPrivateDomain_normal(t *testing.T) {
+
+	ref := "cloudfoundry_domain.private"
+
+	domain := "io"
+	subDomain := "test-domain-res"
+
+	orgID, _ := defaultTestOrg(t)
+
+	resource.ParallelTest(t,
+		resource.TestCase{
+			PreCheck:          func() { testAccPreCheck(t) },
+			ProviderFactories: testAccProvidersFactories,
+			CheckDestroy:      testAccCheckPrivateDomainDestroy(domain),
+			Steps: []resource.TestStep{
+
+				resource.TestStep{
+					Config: fmt.Sprintf(domainResourcePrivate,
+						subDomain, domain, orgID),
+					Check: resource.ComposeTestCheckFunc(
+						checkPrivateDomainExists(ref),
+						resource.TestCheckResourceAttr(
+							ref, "name", subDomain+"."+domain),
+						resource.TestCheckResourceAttr(
+							ref, "sub_domain", subDomain),
+						resource.TestCheckResourceAttr(
+							ref, "domain", domain),
+						resource.TestCheckResourceAttr(
+							ref, "org", orgID),
+					),
+				},
+			},
+		})
+}
+
+func checkShareDomainExists(resource string) resource.TestCheckFunc {
+
+	return func(s *terraform.State) error {
+
+		session := testAccProvider.Meta().(*managers.Session)
+
+		rs, ok := s.RootModule().Resources[resource]
+		if !ok {
+			return fmt.Errorf("domain '%s' not found in terraform state", resource)
 		}
-	}
 
-	if IsImportState(d) && len(finalVariables) == 0 {
-		for k, v := range variables {
-			finalVariables[k] = v
+		id := rs.Primary.ID
+		attributes := rs.Primary.Attributes
+		name := attributes["name"]
+
+		dm := session.ClientV2
+		domains, _, err := dm.GetSharedDomains(ccv2.FilterByName(name))
+		if err != nil {
+			return err
 		}
+		if len(domains) == 0 {
+			return NotFound
+		}
+		if id != domains[0].GUID {
+			return fmt.Errorf("expecting domain guid to be '%s' but got '%s'", id, domains[0].GUID)
+		}
+		return nil
 	}
-	d.Set("variables", finalVariables)
-	return nil
 }
 
-func resourceEvgUpdate(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
+func checkPrivateDomainExists(resource string) resource.TestCheckFunc {
 
-	session := meta.(*managers.Session)
+	return func(s *terraform.State) error {
 
-	name := d.Get("name").(string)
-	tfVariables := d.Get("variables").(map[string]interface{})
+		session := testAccProvider.Meta().(*managers.Session)
 
-	var variables map[string]string
-	var err error
-	switch name {
-	case AppStatusRunning:
-		variables, _, err = session.ClientV2.GetEnvVarGroupRunning()
-	case AppStatusStaging:
-		variables, _, err = session.ClientV2.GetEnvVarGroupStaging()
-	}
-	if err != nil {
-		return diag.FromErr(err)
-	}
-	old, new := d.GetChange("variables")
-	keyToDelete, keyToAdd := getMapChanges(old, new)
-	for _, key := range keyToAdd {
-		variables[key] = tfVariables[key].(string)
-	}
-	for _, key := range keyToDelete {
-		delete(variables, key)
-	}
+		rs, ok := s.RootModule().Resources[resource]
+		if !ok {
+			return fmt.Errorf("domain '%s' not found in terraform state", resource)
+		}
 
-	switch name {
-	case AppStatusRunning:
-		_, err = session.ClientV2.SetEnvVarGroupRunning(variables)
-	case AppStatusStaging:
-		_, err = session.ClientV2.SetEnvVarGroupStaging(variables)
+		id := rs.Primary.ID
+		attributes := rs.Primary.Attributes
+		name := attributes["name"]
+
+		dm := session.ClientV2
+		domains, _, err := dm.GetPrivateDomains(ccv2.FilterByName(name))
+		if err != nil {
+			return err
+		}
+		if len(domains) == 0 {
+			return NotFound
+		}
+		if id != domains[0].GUID {
+			return fmt.Errorf("expecting domain guid to be '%s' but got '%s'", id, domains[0].GUID)
+		}
+		return nil
 	}
-	if err != nil {
-		return diag.FromErr(err)
-	}
-	return nil
 }
 
-func resourceEvgDelete(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
-	session := meta.(*managers.Session)
-	var variables map[string]string
-	var err error
-	switch d.Get("name").(string) {
-	case AppStatusRunning:
-		variables, _, err = session.ClientV2.GetEnvVarGroupRunning()
-	case AppStatusStaging:
-		variables, _, err = session.ClientV2.GetEnvVarGroupStaging()
+func testAccCheckSharedDomainDestroy(domainname string) resource.TestCheckFunc {
+
+	return func(s *terraform.State) error {
+		session := testAccProvider.Meta().(*managers.Session)
+		domains, _, err := session.ClientV2.GetSharedDomains(ccv2.FilterByName(domainname))
+		if err != nil {
+			return err
+		}
+		if len(domains) > 0 {
+			return fmt.Errorf("shared domain with name '%s' still exists in cloud foundry", domainname)
+		}
+		return nil
 	}
-	if err != nil {
-		return diag.FromErr(err)
+}
+
+func testAccCheckPrivateDomainDestroy(domainname string) resource.TestCheckFunc {
+
+	return func(s *terraform.State) error {
+		session := testAccProvider.Meta().(*managers.Session)
+		domains, _, err := session.ClientV2.GetPrivateDomains(ccv2.FilterByName(domainname))
+		if err != nil {
+			return err
+		}
+		if len(domains) > 0 {
+			return fmt.Errorf("shared domain with name '%s' still exists in cloud foundry", domainname)
+		}
+		return nil
 	}
-	for k := range d.Get("variables").(map[string]interface{}) {
-		delete(variables, k)
-	}
-	switch d.Get("name").(string) {
-	case AppStatusRunning:
-		_, err = session.ClientV2.SetEnvVarGroupRunning(variables)
-	case AppStatusStaging:
-		_, err = session.ClientV2.SetEnvVarGroupStaging(variables)
-	}
-	if err != nil {
-		return diag.FromErr(err)
-	}
-	return nil
 }

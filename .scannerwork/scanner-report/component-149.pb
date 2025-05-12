@@ -1,1 +1,1 @@
-• 2goXÚhr&cloudfoundry/resource_cf_space_asgs.go
+• 2goXñhr!cloudfoundry/resource_cf_space.go

@@ -6,24 +6,23 @@ import (
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/resource"
 )
 
-func TestAccUserProvidedService_importBasic(t *testing.T) {
-	resourceName := "cloudfoundry_user_provided_service.mq"
+func TestAccSpace_importBasic(t *testing.T) {
+	resourceName := "cloudfoundry_space.space1"
 
 	resource.Test(t,
 		resource.TestCase{
 			PreCheck:          func() { testAccPreCheck(t) },
 			ProviderFactories: testAccProvidersFactories,
-			CheckDestroy:      testAccCheckUserProvidedServiceDestroyed("mq", "cloudfoundry_space.space1"),
+			CheckDestroy:      testAccCheckSpaceDestroyed("space-one"),
 			Steps: []resource.TestStep{
-
 				resource.TestStep{
-					Config: userProvidedServiceResourceCreate,
+					Config: spaceResource,
 				},
-
 				resource.TestStep{
-					ResourceName:      resourceName,
-					ImportState:       true,
-					ImportStateVerify: true,
+					ResourceName:            resourceName,
+					ImportState:             true,
+					ImportStateVerify:       true,
+					ImportStateVerifyIgnore: []string{"staging_asgs", "asgs"},
 				},
 			},
 		})

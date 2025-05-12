@@ -1,1 +1,1 @@
-ù 2goX∞hr1cloudfoundry/resource_cf_user_provided_service.go
+ù 2goXÊhr cloudfoundry/resource_cf_user.go

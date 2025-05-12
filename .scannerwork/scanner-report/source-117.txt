@@ -1,229 +1,181 @@
 package cloudfoundry
 
 import (
-	"fmt"
-	"testing"
-
 	"code.cloudfoundry.org/cli/api/cloudcontroller/ccv2"
+	"context"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/diag"
 	"github.com/terraform-providers/terraform-provider-cloudfoundry/cloudfoundry/managers"
+	"strings"
 
-	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/resource"
-	"github.com/hashicorp/terraform-plugin-sdk/v2/terraform"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
 )
 
-const domainResourceShared = `
+func resourceDomain() *schema.Resource {
 
-resource "cloudfoundry_domain" "shared" {
-  sub_domain = "dev-res"
-  domain = "%s"
-}
-`
+	return &schema.Resource{
 
-const domainResourceSharedTCP = `
+		CreateContext: resourceDomainCreate,
+		ReadContext:   resourceDomainRead,
+		DeleteContext: resourceDomainDelete,
 
-data "cloudfoundry_router_group" "tcp" {
-  name = "default-tcp"
-}
+		Importer: &schema.ResourceImporter{
+			StateContext: ImportReadContext(resourceDomainRead),
+		},
 
-resource "cloudfoundry_domain" "shared-tcp" {
-  sub_domain = "tcp-test-res"
-  domain = "%s"
-  router_group = "${data.cloudfoundry_router_group.tcp.id}"
-}
-`
+		Schema: map[string]*schema.Schema{
 
-const domainResourcePrivate = `
-
-resource "cloudfoundry_domain" "private" {
-  name = "%s.%s"
-  org = "%s"
-}
-`
-
-func TestAccResSharedDomain_normal(t *testing.T) {
-
-	ref := "cloudfoundry_domain.shared"
-	domainname := "dev-res." + defaultAppDomain()
-
-	resource.ParallelTest(t,
-		resource.TestCase{
-			PreCheck:          func() { testAccPreCheck(t) },
-			ProviderFactories: testAccProvidersFactories,
-			CheckDestroy:      testAccCheckSharedDomainDestroy(domainname),
-			Steps: []resource.TestStep{
-
-				resource.TestStep{
-					Config: fmt.Sprintf(domainResourceShared, defaultAppDomain()),
-					Check: resource.ComposeTestCheckFunc(
-						checkShareDomainExists(ref),
-						resource.TestCheckResourceAttr(
-							ref, "name", domainname),
-						resource.TestCheckResourceAttr(
-							ref, "sub_domain", "dev-res"),
-						resource.TestCheckResourceAttr(
-							ref, "domain", defaultAppDomain()),
-					),
-				},
-				resource.TestStep{
-					ResourceName:      ref,
-					ImportState:       true,
-					ImportStateVerify: true,
-				},
+			"name": &schema.Schema{
+				Type:     schema.TypeString,
+				ForceNew: true,
+				Optional: true,
+				Computed: true,
 			},
-		})
-}
-
-func TestAccResSharedTCPDomain_normal(t *testing.T) {
-
-	ref := "cloudfoundry_domain.shared-tcp"
-	domainname := "tcp-test-res." + defaultAppDomain()
-
-	resource.ParallelTest(t,
-		resource.TestCase{
-			PreCheck:          func() { testAccPreCheck(t) },
-			ProviderFactories: testAccProvidersFactories,
-			CheckDestroy:      testAccCheckSharedDomainDestroy(domainname),
-			Steps: []resource.TestStep{
-
-				resource.TestStep{
-					Config: fmt.Sprintf(domainResourceSharedTCP, defaultAppDomain()),
-					Check: resource.ComposeTestCheckFunc(
-						checkShareDomainExists(ref),
-						resource.TestCheckResourceAttr(
-							ref, "name", domainname),
-						resource.TestCheckResourceAttr(
-							ref, "sub_domain", "tcp-test-res"),
-						resource.TestCheckResourceAttr(
-							ref, "domain", defaultAppDomain()),
-						resource.TestCheckResourceAttr(
-							ref, "router_type", "tcp"),
-					),
-				},
+			"sub_domain": &schema.Schema{
+				Type:     schema.TypeString,
+				ForceNew: true,
+				Optional: true,
+				Computed: true,
 			},
-		})
-}
-
-func TestAccResPrivateDomain_normal(t *testing.T) {
-
-	ref := "cloudfoundry_domain.private"
-
-	domain := "io"
-	subDomain := "test-domain-res"
-
-	orgID, _ := defaultTestOrg(t)
-
-	resource.ParallelTest(t,
-		resource.TestCase{
-			PreCheck:          func() { testAccPreCheck(t) },
-			ProviderFactories: testAccProvidersFactories,
-			CheckDestroy:      testAccCheckPrivateDomainDestroy(domain),
-			Steps: []resource.TestStep{
-
-				resource.TestStep{
-					Config: fmt.Sprintf(domainResourcePrivate,
-						subDomain, domain, orgID),
-					Check: resource.ComposeTestCheckFunc(
-						checkPrivateDomainExists(ref),
-						resource.TestCheckResourceAttr(
-							ref, "name", subDomain+"."+domain),
-						resource.TestCheckResourceAttr(
-							ref, "sub_domain", subDomain),
-						resource.TestCheckResourceAttr(
-							ref, "domain", domain),
-						resource.TestCheckResourceAttr(
-							ref, "org", orgID),
-					),
-				},
+			"domain": &schema.Schema{
+				Type:     schema.TypeString,
+				ForceNew: true,
+				Optional: true,
+				Computed: true,
 			},
-		})
-}
-
-func checkShareDomainExists(resource string) resource.TestCheckFunc {
-
-	return func(s *terraform.State) error {
-
-		session := testAccProvider.Meta().(*managers.Session)
-
-		rs, ok := s.RootModule().Resources[resource]
-		if !ok {
-			return fmt.Errorf("domain '%s' not found in terraform state", resource)
-		}
-
-		id := rs.Primary.ID
-		attributes := rs.Primary.Attributes
-		name := attributes["name"]
-
-		dm := session.ClientV2
-		domains, _, err := dm.GetSharedDomains(ccv2.FilterByName(name))
-		if err != nil {
-			return err
-		}
-		if len(domains) == 0 {
-			return NotFound
-		}
-		if id != domains[0].GUID {
-			return fmt.Errorf("expecting domain guid to be '%s' but got '%s'", id, domains[0].GUID)
-		}
-		return nil
+			"internal": &schema.Schema{
+				Type:        schema.TypeBool,
+				ForceNew:    true,
+				Optional:    true,
+				Description: "Flag that sets the domain as an internal domain. Internal domains are used for internal app to app networking only.",
+				Default:     false,
+			},
+			"router_group": &schema.Schema{
+				Type:          schema.TypeString,
+				ForceNew:      true,
+				Optional:      true,
+				ConflictsWith: []string{"org"},
+			},
+			"router_type": &schema.Schema{
+				Type:     schema.TypeString,
+				Computed: true,
+			},
+			"org": &schema.Schema{
+				Type:          schema.TypeString,
+				ForceNew:      true,
+				Optional:      true,
+				ConflictsWith: []string{"router_group"},
+			},
+			// "shared-with": &schema.Schema{
+			// 	Type:     schema.TypeSet,
+			// 	Optional: true,
+			// 	Elem:     &schema.Schema{Type: schema.TypeString},
+			// 	Set:      resourceStringHash,
+			// },
+		},
 	}
 }
 
-func checkPrivateDomainExists(resource string) resource.TestCheckFunc {
+func resourceDomainCreate(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
 
-	return func(s *terraform.State) error {
+	session := meta.(*managers.Session)
 
-		session := testAccProvider.Meta().(*managers.Session)
+	nameAttr, nameOk := d.GetOk("name")
+	subDomainAttr, subDomainOk := d.GetOk("sub_domain")
+	domainAttr, domainOk := d.GetOk("domain")
+	org, orgOk := d.GetOk("org")
+	routerGroup := d.Get("router_group")
 
-		rs, ok := s.RootModule().Resources[resource]
-		if !ok {
-			return fmt.Errorf("domain '%s' not found in terraform state", resource)
+	if nameOk {
+
+		domainParts := strings.Split(nameAttr.(string), ".")
+		if len(domainParts) <= 1 {
+			return diag.Errorf("the 'name' attribute does not contain a sub-domain")
 		}
+		sd := domainParts[0]
+		dn := strings.Join(domainParts[1:], ".")
 
-		id := rs.Primary.ID
-		attributes := rs.Primary.Attributes
-		name := attributes["name"]
-
-		dm := session.ClientV2
-		domains, _, err := dm.GetPrivateDomains(ccv2.FilterByName(name))
-		if err != nil {
-			return err
+		if subDomainOk {
+			return diag.Errorf("the 'sub_domain' will be computed from the 'name' attribute, so it is not needed here")
 		}
-		if len(domains) == 0 {
-			return NotFound
+		if domainOk {
+			return diag.Errorf("the 'domain' will be computed from the 'name' attribute, so it is not needed here")
 		}
-		if id != domains[0].GUID {
-			return fmt.Errorf("expecting domain guid to be '%s' but got '%s'", id, domains[0].GUID)
+		d.Set("sub_domain", sd)
+		d.Set("domain", dn)
+	} else {
+		if !subDomainOk || !domainOk {
+			return diag.Errorf("to compute the 'name' both the 'sub_domain' and 'domain' attributes need to be provided")
 		}
-		return nil
+		d.Set("name", subDomainAttr.(string)+"."+domainAttr.(string))
 	}
+
+	var (
+		ccDomain ccv2.Domain
+		err      error
+	)
+	name := d.Get("name").(string)
+
+	dm := session.ClientV2
+	if orgOk {
+		ccDomain, _, err = dm.CreatePrivateDomain(name, org.(string))
+	} else {
+		ccDomain, _, err = dm.CreateSharedDomain(name, routerGroup.(string), d.Get("internal").(bool))
+	}
+	if err != nil {
+		return diag.FromErr(err)
+	}
+	d.Set("router_type", ccDomain.RouterGroupType)
+	d.SetId(ccDomain.GUID)
+	return nil
 }
 
-func testAccCheckSharedDomainDestroy(domainname string) resource.TestCheckFunc {
+func resourceDomainRead(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
+	session := meta.(*managers.Session)
 
-	return func(s *terraform.State) error {
-		session := testAccProvider.Meta().(*managers.Session)
-		domains, _, err := session.ClientV2.GetSharedDomains(ccv2.FilterByName(domainname))
-		if err != nil {
-			return err
-		}
-		if len(domains) > 0 {
-			return fmt.Errorf("shared domain with name '%s' still exists in cloud foundry", domainname)
-		}
-		return nil
+	dm := session.ClientV2
+	id := d.Id()
+
+	ccDomain, _, err := dm.GetSharedDomain(id)
+	if err != nil {
+		ccDomain, _, err = dm.GetPrivateDomain(id)
 	}
+	if err != nil {
+		if IsErrNotFound(err) {
+			d.SetId("")
+			return nil
+		}
+		return diag.FromErr(err)
+	}
+	domainParts := strings.Split(ccDomain.Name, ".")
+	subDomain := domainParts[0]
+	domain := strings.Join(domainParts[1:], ".")
+
+	d.Set("name", ccDomain.Name)
+	d.Set("sub_domain", subDomain)
+	d.Set("domain", domain)
+	d.Set("router_group", ccDomain.RouterGroupGUID)
+	d.Set("router_type", ccDomain.RouterGroupType)
+	d.Set("internal", ccDomain.Internal)
+	d.Set("org", ccDomain.OwningOrganizationGUID)
+
+	return nil
 }
 
-func testAccCheckPrivateDomainDestroy(domainname string) resource.TestCheckFunc {
+func resourceDomainDelete(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
 
-	return func(s *terraform.State) error {
-		session := testAccProvider.Meta().(*managers.Session)
-		domains, _, err := session.ClientV2.GetPrivateDomains(ccv2.FilterByName(domainname))
-		if err != nil {
-			return err
-		}
-		if len(domains) > 0 {
-			return fmt.Errorf("shared domain with name '%s' still exists in cloud foundry", domainname)
-		}
-		return nil
+	session := meta.(*managers.Session)
+	if session == nil {
+		return diag.Errorf("client is nil")
 	}
+
+	dm := session.ClientV2
+	id := d.Id()
+
+	var err error
+	if _, orgOk := d.GetOk("org"); orgOk {
+		_, err = dm.DeletePrivateDomain(id)
+	} else {
+		_, err = dm.DeleteSharedDomain(id)
+	}
+	return diag.FromErr(err)
 }

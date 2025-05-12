@@ -1,45 +1,26 @@
 package v3appdeployers
 
-import (
-	"strings"
-)
+// CreateRouteMappings : create route mappings
+func (a Actor) CreateRouteMappings(appDeploy AppDeploy, reverse FallbackFunction) Action {
+	return Action{
+		Forward: func(ctx Context) (Context, error) {
+			appResp := ctx["app_response"].(AppDeployResponse)
 
-const DefaultStrategy = "default"
-
-type Deployer struct {
-	strategies []Strategy
-}
-
-func NewDeployer(strategies ...Strategy) *Deployer {
-	return &Deployer{
-		strategies: strategies,
-	}
-}
-
-func (d Deployer) Strategy(strategyName string) Strategy {
-	strategyName = strings.ToLower(strategyName)
-	var defaultStrategy Strategy
-	for _, strategy := range d.strategies {
-		for _, name := range strategy.Names() {
-			if name == strategyName {
-				return strategy
+			mappings, err := a.runBinder.MapRoutes(AppDeploy{
+				App:          appResp.App,
+				Mappings:     appDeploy.Mappings,
+				StageTimeout: appDeploy.StageTimeout,
+				BindTimeout:  appDeploy.BindTimeout,
+				StartTimeout: appDeploy.StartTimeout,
+			})
+			if err != nil {
+				return ctx, err
 			}
-			if name == DefaultStrategy {
-				defaultStrategy = strategy
-			}
-		}
-	}
-	return defaultStrategy
-}
 
-func ValidStrategy(strategyName string) ([]string, bool) {
-	strategyName = strings.ToLower(strategyName)
-	// names := Standard{}.Names()
-	names := append(Standard{}.Names(), append(BlueGreen{}.Names(), Rolling{}.Names()...)...)
-	for _, name := range names {
-		if name == strategyName {
-			return names, true
-		}
+			appResp.Mappings = mappings
+			ctx["app_response"] = appResp
+			return ctx, nil
+		},
+		ReversePrevious: reverse,
 	}
-	return names, false
 }

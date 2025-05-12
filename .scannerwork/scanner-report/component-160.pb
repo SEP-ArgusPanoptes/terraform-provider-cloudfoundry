@@ -1,1 +1,1 @@
-  2goXÙhrcloudfoundry/structures_app.go
+  2goXžhr%cloudfoundry/resource_cf_user_test.go

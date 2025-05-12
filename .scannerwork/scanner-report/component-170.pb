@@ -1,1 +1,0 @@
-ª 2xmlXÚ*hrcoverage.xml

@@ -1,69 +1,51 @@
 package cloudfoundry
 
 import (
-	"fmt"
+	"code.cloudfoundry.org/cli/api/router/routererror"
+	"context"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/diag"
 	"github.com/terraform-providers/terraform-provider-cloudfoundry/cloudfoundry/managers"
-	"testing"
 
-	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/resource"
-	"github.com/hashicorp/terraform-plugin-sdk/v2/terraform"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
 )
 
-const routerGroupDataResource = `
+func dataSourceRouterGroup() *schema.Resource {
 
-data "cloudfoundry_router_group" "rg" {
-    name = "default-tcp"
-}
-`
+	return &schema.Resource{
 
-func TestAccDataSourceRouterGroup_normal(t *testing.T) {
+		ReadContext: dataSourceRouterGroupRead,
 
-	ref := "data.cloudfoundry_router_group.rg"
+		Schema: map[string]*schema.Schema{
 
-	resource.ParallelTest(t,
-		resource.TestCase{
-			PreCheck:          func() { testAccPreCheck(t) },
-			ProviderFactories: testAccProvidersFactories,
-			Steps: []resource.TestStep{
-
-				resource.TestStep{
-					Config: routerGroupDataResource,
-					Check: resource.ComposeTestCheckFunc(
-						checkDataSourceRouterGroupExists(ref),
-						resource.TestCheckResourceAttr(
-							ref, "name", "default-tcp"),
-					),
-				},
+			"name": &schema.Schema{
+				Type:     schema.TypeString,
+				Required: true,
 			},
-		})
+			"type": &schema.Schema{
+				Type:     schema.TypeString,
+				Computed: true,
+			},
+		},
+	}
 }
 
-func checkDataSourceRouterGroupExists(resource string) resource.TestCheckFunc {
-
-	return func(s *terraform.State) error {
-
-		session := testAccProvider.Meta().(*managers.Session)
-
-		rs, ok := s.RootModule().Resources[resource]
-		if !ok {
-			return fmt.Errorf("router_group '%s' not found in terraform state", resource)
-		}
-
-		id := rs.Primary.ID
-		name := rs.Primary.Attributes["name"]
-		rgType := rs.Primary.Attributes["type"]
-
-		routerGroup, err := session.RouterClient.GetRouterGroupByName(name)
-		if err != nil {
-			return err
-		}
-		if err := assertSame(id, routerGroup.GUID); err != nil {
-			return err
-		}
-		if err := assertSame(rgType, routerGroup.Type); err != nil {
-			return err
-		}
-
-		return nil
+func dataSourceRouterGroupRead(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
+	session := meta.(*managers.Session)
+	if session == nil {
+		return diag.Errorf("client is nil")
 	}
+
+	dm := session.RouterClient
+	name := d.Get("name").(string)
+
+	routerGroup, err := dm.GetRouterGroupByName(name)
+	if err != nil {
+		if err == (routererror.ResourceNotFoundError{}) {
+			return diag.FromErr(NotFound)
+		}
+		return diag.FromErr(err)
+	}
+	d.SetId(routerGroup.GUID)
+	d.Set("type", routerGroup.Type)
+	return nil
 }

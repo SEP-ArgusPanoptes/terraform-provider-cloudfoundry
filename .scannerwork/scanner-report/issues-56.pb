@@ -1,2 +1,2 @@
-
-goS100gRename function "TestAccServiceInstance_importBasic" to match the regular expression ^(_|[a-zA-Z0-9]+)$ 2 '
+}
+goS100eRename function "TestAccServiceBroker_importBasic" to match the regular expression ^(_|[a-zA-Z0-9]+)$ 2 %

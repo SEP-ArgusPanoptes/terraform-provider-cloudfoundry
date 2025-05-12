@@ -1,1 +1,1 @@
-n 2goX­hr%cloudfoundry/resource_cf_buildpack.go
+n 2goXÃhr$cloudfoundry/resource_cf_asg_test.go

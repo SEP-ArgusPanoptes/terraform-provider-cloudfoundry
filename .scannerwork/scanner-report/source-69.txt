@@ -1,185 +1,234 @@
 package appdeployers
 
 import (
+	"fmt"
+	"time"
+
 	"code.cloudfoundry.org/cli/api/cloudcontroller/ccv2"
 	"code.cloudfoundry.org/cli/api/cloudcontroller/ccv2/constant"
-	"github.com/terraform-providers/terraform-provider-cloudfoundry/cloudfoundry/managers/bits"
+	"github.com/terraform-providers/terraform-provider-cloudfoundry/cloudfoundry/common"
+	"github.com/terraform-providers/terraform-provider-cloudfoundry/cloudfoundry/managers/noaa"
 )
 
-type Standard struct {
-	bitsManager *bits.BitsManager
-	client      *ccv2.Client
-	runBinder   *RunBinder
+type RunBinder struct {
+	client     *ccv2.Client
+	noaaClient *noaa.NOAAClient
 }
 
-func NewStandard(bitsManager *bits.BitsManager, client *ccv2.Client, runBinder *RunBinder) *Standard {
-	return &Standard{
-		bitsManager: bitsManager,
-		client:      client,
-		runBinder:   runBinder,
+func NewRunBinder(client *ccv2.Client, noaaClient *noaa.NOAAClient) *RunBinder {
+	return &RunBinder{
+		client:     client,
+		noaaClient: noaaClient,
 	}
 }
 
-func (s Standard) Deploy(appDeploy AppDeploy) (AppDeployResponse, error) {
-	stateAsk := appDeploy.App.State
-	var deployFunc func(app ccv2.Application) (ccv2.Application, ccv2.Warnings, error)
-	if appDeploy.App.GUID != "" {
-		deployFunc = s.client.UpdateApplication
-	} else {
-		deployFunc = s.client.CreateApplication
-	}
-	defaultReverse := func(ctx Context) error {
-		appResp := ctx["app_response"].(AppDeployResponse)
-		if appResp.App.GUID == "" {
-			return nil
+func (r RunBinder) MapRoutes(appDeploy AppDeploy) ([]ccv2.RouteMapping, error) {
+	mappings := make([]ccv2.RouteMapping, 0)
+	appGuid := appDeploy.App.GUID
+
+	for _, mappingCur := range appDeploy.Mappings {
+		exists, err := r.mappingExists(appGuid, mappingCur)
+		if err != nil {
+			return mappings, err
 		}
-		_, err := s.client.DeleteApplication(appResp.App.GUID)
+		if exists {
+			mappings = append(mappings, mappingCur)
+			continue
+		}
+		var port *int
+		if mappingCur.AppPort > 0 {
+			port = &mappingCur.AppPort
+		}
+		mapping, _, err := r.client.CreateRouteMapping(appGuid, mappingCur.RouteGUID, port)
+		if err != nil {
+			return mappings, err
+		}
+		// we wait one second after mapping because mapping is an async operation which can take time to complete
+		// mostly due to route emitter to perform its action inside diego
+		time.Sleep(1 * time.Second)
+		mappings = append(mappings, mapping)
+	}
+	return mappings, nil
+}
+
+func (r RunBinder) mappingExists(appGuid string, curMapping ccv2.RouteMapping) (bool, error) {
+	mappings, _, err := r.client.GetRouteMappings(
+		ccv2.FilterEqual(constant.RouteGUIDFilter, curMapping.RouteGUID),
+		ccv2.FilterEqual(constant.AppGUIDFilter, appGuid),
+	)
+	if err != nil {
+		return false, err
+	}
+	if curMapping.AppPort <= 0 {
+		return len(mappings) > 0, nil
+	}
+	for _, mapping := range mappings {
+		if mapping.AppPort == curMapping.AppPort {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (r RunBinder) bindingExists(appGuid string, binding ccv2.ServiceBinding) (bool, error) {
+	bindings, _, err := r.client.GetServiceBindings(
+		ccv2.FilterEqual(constant.ServiceInstanceGUIDFilter, binding.ServiceInstanceGUID),
+		ccv2.FilterEqual(constant.AppGUIDFilter, appGuid),
+	)
+	if err != nil {
+		return false, err
+	}
+	return len(bindings) > 0, nil
+}
+
+func (r RunBinder) BindServiceInstances(appDeploy AppDeploy) ([]ccv2.ServiceBinding, error) {
+	bindings := make([]ccv2.ServiceBinding, 0)
+	appGuid := appDeploy.App.GUID
+	for _, binding := range appDeploy.ServiceBindings {
+		exists, err := r.bindingExists(appGuid, binding)
+		if err != nil {
+			return bindings, err
+		}
+		if exists {
+			bindings = append(bindings, binding)
+			continue
+		}
+		binding, _, err := r.client.CreateServiceBinding(appGuid, binding.ServiceInstanceGUID, binding.Name, true, binding.Parameters)
+		if err != nil {
+			return bindings, err
+		}
+		bindings = append(bindings, binding)
+		if binding.LastOperation.State == constant.LastOperationSucceeded {
+			continue
+		}
+		err = common.PollingWithTimeout(func() (bool, error) {
+			binding, _, err := r.client.GetServiceBinding(binding.GUID)
+			if err != nil {
+				return true, err
+			}
+			if binding.LastOperation.State == constant.LastOperationSucceeded {
+				return true, nil
+			}
+			if binding.LastOperation.State == constant.LastOperationFailed {
+				return true, fmt.Errorf(
+					"Binding %s failed for app %s, reason: %s",
+					binding.Name,
+					appDeploy.App.Name,
+					binding.LastOperation.Description,
+				)
+			}
+			return false, nil
+		}, 5*time.Second, appDeploy.BindTimeout)
+		if err != nil {
+			return bindings, err
+		}
+	}
+	return bindings, nil
+}
+
+func (r RunBinder) WaitStart(appDeploy AppDeploy) error {
+	return common.PollingWithTimeout(func() (bool, error) {
+		appInstances, _, err := r.client.GetApplicationApplicationInstances(appDeploy.App.GUID)
+		if err != nil {
+			return true, err
+		}
+		if appDeploy.App.Instances.Value == 0 {
+			return true, nil
+		}
+		for i, instance := range appInstances {
+			if instance.State == constant.ApplicationInstanceStarting {
+				continue
+			}
+			if instance.State == constant.ApplicationInstanceRunning {
+				return true, nil
+			}
+			if instance.State == constant.ApplicationInstanceDown {
+				return false, fmt.Errorf("Instance %d failed with state %s for app %s", i, instance.State, appDeploy.App.Name)
+			}
+			return true, fmt.Errorf("Instance %d failed with state %s for app %s", i, instance.State, appDeploy.App.Name)
+		}
+
+		return false, nil
+	}, 5*time.Second, appDeploy.StartTimeout)
+}
+
+func (r RunBinder) WaitStaging(appDeploy AppDeploy) error {
+	err := common.PollingWithTimeout(func() (bool, error) {
+		app, _, err := r.client.GetApplication(appDeploy.App.GUID)
+		if err != nil {
+			return true, err
+		}
+		if app.PackageState == constant.ApplicationPackageStaged {
+			return true, nil
+		}
+		if app.PackageState == constant.ApplicationPackageFailed {
+			return true, fmt.Errorf(
+				"Staging failed for app %s, reason: %s, description: %s",
+				app.Name,
+				app.StagingFailedReason,
+				app.StagingFailedDescription,
+			)
+		}
+		return false, nil
+	}, 5*time.Second, appDeploy.StageTimeout)
+	if err != nil {
+		return r.processDeployErr(err, appDeploy)
+	}
+	return nil
+}
+
+func (r RunBinder) Start(appDeploy AppDeploy) (ccv2.Application, error) {
+	_, _, err := r.client.UpdateApplication(ccv2.Application{
+		GUID:  appDeploy.App.GUID,
+		State: constant.ApplicationStarted,
+	})
+	if err != nil {
+		return ccv2.Application{}, err
+	}
+	err = r.WaitStaging(appDeploy)
+	if err != nil {
+		return ccv2.Application{}, err
+	}
+	err = r.WaitStart(appDeploy)
+	if err != nil {
+		return ccv2.Application{}, r.processDeployErr(err, appDeploy)
+	}
+	app, _, err := r.client.GetApplication(appDeploy.App.GUID)
+	if err != nil {
+		return app, err
+	}
+	return app, nil
+}
+
+func (r RunBinder) Stop(appDeploy AppDeploy) error {
+	_, _, err := r.client.UpdateApplication(ccv2.Application{
+		GUID:  appDeploy.App.GUID,
+		State: constant.ApplicationStopped,
+	})
+	if err != nil {
 		return err
 	}
-	actions := Actions{
-		{
-			Forward: func(ctx Context) (Context, error) {
-				app := appDeploy.App
-				app.State = constant.ApplicationStopped
-				app, _, err := deployFunc(app)
-				if err != nil {
-					return ctx, err
-				}
-				ctx["app_response"] = AppDeployResponse{
-					App: app,
-				}
-				return ctx, nil
-			},
-		},
-		{
-			Forward: func(ctx Context) (Context, error) {
-				appResp := ctx["app_response"].(AppDeployResponse)
-				mappings, err := s.runBinder.MapRoutes(AppDeploy{
-					App:          appResp.App,
-					Mappings:     appDeploy.Mappings,
-					StageTimeout: appDeploy.StageTimeout,
-					BindTimeout:  appDeploy.BindTimeout,
-					StartTimeout: appDeploy.StartTimeout,
-				})
-				if err != nil {
-					return ctx, err
-				}
-				ctx["app_response"] = AppDeployResponse{
-					App:          appResp.App,
-					RouteMapping: mappings,
-				}
-				return ctx, nil
-			},
-			ReversePrevious: defaultReverse,
-		},
-		{
-			Forward: func(ctx Context) (Context, error) {
-				appResp := ctx["app_response"].(AppDeployResponse)
-				bindings, err := s.runBinder.BindServiceInstances(AppDeploy{
-					App:             appResp.App,
-					ServiceBindings: appDeploy.ServiceBindings,
-					StageTimeout:    appDeploy.StageTimeout,
-					BindTimeout:     appDeploy.BindTimeout,
-					StartTimeout:    appDeploy.StartTimeout,
-				})
-				if err != nil {
-					return ctx, err
-				}
-				ctx["app_response"] = AppDeployResponse{
-					App:             appResp.App,
-					RouteMapping:    appResp.RouteMapping,
-					ServiceBindings: bindings,
-				}
-				return ctx, nil
-			},
-			ReversePrevious: defaultReverse,
-		},
-		{
-			Forward: func(ctx Context) (Context, error) {
-				if appDeploy.Path == "" {
-					return ctx, nil
-				}
-				appResp := ctx["app_response"].(AppDeployResponse)
-				err := s.bitsManager.UploadApp(appResp.App.GUID, appDeploy.Path)
-				if err != nil {
-					return ctx, err
-				}
-				return ctx, nil
-			},
-			ReversePrevious: defaultReverse,
-		},
-		{
-			Forward: func(ctx Context) (Context, error) {
-				if stateAsk == constant.ApplicationStopped {
-					return ctx, nil
-				}
-				appResp := ctx["app_response"].(AppDeployResponse)
-				app, err := s.runBinder.Start(AppDeploy{
-					App:          appResp.App,
-					StageTimeout: appDeploy.StageTimeout,
-					BindTimeout:  appDeploy.BindTimeout,
-					StartTimeout: appDeploy.StartTimeout,
-				})
-				if err != nil {
-					return ctx, err
-				}
-				ctx["app_response"] = AppDeployResponse{
-					App:             app,
-					RouteMapping:    rejoinMappingPort(app.Ports[0], appResp.RouteMapping),
-					ServiceBindings: appResp.ServiceBindings,
-				}
-				return ctx, err
-			},
-			ReversePrevious: defaultReverse,
-		},
-	}
-	var appResp AppDeployResponse
-	ctx, err := actions.Execute()
-	if appRespCtx, ok := ctx["app_response"]; ok {
-		appResp = appRespCtx.(AppDeployResponse)
-	}
-	if stateAsk == constant.ApplicationStopped || err != nil {
-		appResp.App.State = constant.ApplicationStopped
-	} else {
-		appResp.App.State = constant.ApplicationStarted
-	}
-
-	return appResp, err
+	return nil
 }
 
-func (s Standard) Restage(appDeploy AppDeploy) (AppDeployResponse, error) {
-	app, _, err := s.client.RestageApplication(appDeploy.App)
+func (r RunBinder) Restart(appDeploy AppDeploy, stageTimeout time.Duration) error {
+	err := r.Stop(appDeploy)
 	if err != nil {
-		return AppDeployResponse{}, err
+		return err
 	}
-	appDeploy.App = app
-
-	appResp := AppDeployResponse{
-		App:             app,
-		RouteMapping:    appDeploy.Mappings,
-		ServiceBindings: appDeploy.ServiceBindings,
-	}
-
-	err = s.runBinder.WaitStaging(appDeploy)
+	_, err = r.Start(appDeploy)
 	if err != nil {
-		return appResp, err
+		return err
 	}
-	err = s.runBinder.WaitStart(appDeploy)
-	if err != nil {
-		return appResp, err
-	}
-	if appDeploy.App.State == constant.ApplicationStopped {
-		err := s.runBinder.Stop(appDeploy)
-		return appResp, err
-	}
-
-	return appResp, nil
+	return nil
 }
 
-func (s Standard) IsCreateNewApp() bool {
-	return false
-}
-
-func (s Standard) Names() []string {
-	return []string{"standard", "v2", DefaultStrategie}
+func (r RunBinder) processDeployErr(origErr error, appDeploy AppDeploy) error {
+	var err error
+	var logs string
+	logs, err = r.noaaClient.RecentLogs(appDeploy.App.GUID)
+	if err != nil {
+		logs = fmt.Sprintf("Error occurred when recolting app %s logs: %s", appDeploy.App.Name, err.Error())
+	}
+	return fmt.Errorf("%s\n\nApp '%s' logs: \n%s", origErr.Error(), appDeploy.App.Name, logs)
 }

@@ -1,1 +1,1 @@
-i 2goX¢hr'cloudfoundry/resource_cf_app_migrate.go
+i 2goXðhrcloudfoundry/resource_cf_app.go

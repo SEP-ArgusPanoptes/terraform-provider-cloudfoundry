@@ -1,1 +1,1 @@
-! 2goXkhr/cloudfoundry/data_source_cf_service_instance.go
+! 2goXqhr&cloudfoundry/data_source_cf_service.go

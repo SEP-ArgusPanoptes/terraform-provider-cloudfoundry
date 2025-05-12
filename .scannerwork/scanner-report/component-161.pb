@@ -1,1 +1,1 @@
-¡ 2goXµhrcloudfoundry/utils_clients.go
+¡ 2goXÙhrcloudfoundry/structures_app.go

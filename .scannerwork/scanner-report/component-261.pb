@@ -1,1 +1,1 @@
-… 2rubyX"hrCtests/cf-acceptance-tests/assets/service_broker/spec/spec_helper.rb
+… 2rubyX¡hrKtests/cf-acceptance-tests/assets/service_broker/spec/service_broker_spec.rb
