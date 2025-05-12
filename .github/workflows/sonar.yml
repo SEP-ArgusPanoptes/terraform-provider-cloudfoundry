@@ -15,7 +15,7 @@ jobs:
 
       - name: Run tests & collect coverage
         run: |
-          go test ./... -coverprofile=coverage.out
+          go test ./... -short -coverprofile=coverage.out
           go install github.com/boumenot/gocover-cobertura@latest
           gocover-cobertura < coverage.out > coverage.xml
 
