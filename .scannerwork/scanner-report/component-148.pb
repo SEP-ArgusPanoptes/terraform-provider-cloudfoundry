@@ -1,0 +1,1 @@
+” 2goXñhr!cloudfoundry/resource_cf_space.go

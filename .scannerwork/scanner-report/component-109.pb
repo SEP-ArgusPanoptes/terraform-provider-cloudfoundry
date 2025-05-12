@@ -1,0 +1,1 @@
+m 2goXÃhr$cloudfoundry/resource_cf_asg_test.go

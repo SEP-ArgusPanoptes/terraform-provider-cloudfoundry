@@ -1,0 +1,1 @@
+Å 2rubyX—hrAtests/cf-acceptance-tests/assets/service_broker/service_broker.rb

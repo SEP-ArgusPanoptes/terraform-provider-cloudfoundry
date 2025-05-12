@@ -1,0 +1,10 @@
+C:\Users\20221474\SEP_local\terraform-provider-cloudfoundry\scripts\migration\migrate_tf_cf.#__main__
+false
+12bd12a0ff6a13af2178904595d638c1
+argparse.ArgumentParser.__init__
+migrate_tf_cf.HCLConverter.__init__
+migrate_tf_cf.JSONConverter.__init__
+sys.exit
+==
+migrate
+parse_args

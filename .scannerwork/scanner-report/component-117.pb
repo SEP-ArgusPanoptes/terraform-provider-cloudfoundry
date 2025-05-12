@@ -1,0 +1,1 @@
+u 2goXæhr'cloudfoundry/resource_cf_domain_test.go

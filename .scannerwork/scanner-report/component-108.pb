@@ -1,0 +1,1 @@
+l 2goXÓhrcloudfoundry/resource_cf_asg.go

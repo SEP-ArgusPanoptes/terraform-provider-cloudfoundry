@@ -1,0 +1,1 @@
+• 2goXÚhr&cloudfoundry/resource_cf_space_asgs.go

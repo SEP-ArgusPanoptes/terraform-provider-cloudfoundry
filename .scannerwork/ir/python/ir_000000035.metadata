@@ -1,0 +1,7 @@
+migrate_tf_cf.HCLConverter.remove_disable_blue_green_deployment
+false
+22bf36e166128ed3c02999519adf83ea
+builtins.print
+re.compile
+==
+match

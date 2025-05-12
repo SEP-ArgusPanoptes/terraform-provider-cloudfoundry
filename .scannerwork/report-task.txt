@@ -1,0 +1,7 @@
+organization=sep-arguspanoptes
+projectKey=SEP-ArgusPanoptes_terraform-provider-cloudfoundry
+serverUrl=https://sonarcloud.io
+serverVersion=8.0.0.63207
+dashboardUrl=https://sonarcloud.io/dashboard?id=SEP-ArgusPanoptes_terraform-provider-cloudfoundry
+ceTaskId=AZbE9fSQyESXl6eN_ZXs
+ceTaskUrl=https://sonarcloud.io/api/ce/task?id=AZbE9fSQyESXl6eN_ZXs

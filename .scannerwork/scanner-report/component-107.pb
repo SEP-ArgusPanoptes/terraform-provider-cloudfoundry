@@ -1,0 +1,1 @@
+k 2goX”hr$cloudfoundry/resource_cf_app_test.go

@@ -1,0 +1,1 @@
+Ù 2	terraformX1hrexamples/ldap/org2.tf

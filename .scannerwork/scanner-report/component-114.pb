@@ -1,0 +1,1 @@
+r 2goX©hr'cloudfoundry/resource_cf_default_asg.go
