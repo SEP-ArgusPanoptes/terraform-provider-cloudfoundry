@@ -1,1 +1,1 @@
-ƒ 2rubyX¡hrKtests/cf-acceptance-tests/assets/service_broker/spec/service_broker_spec.rb
+ƒ 2rubyXwhrCtests/cf-acceptance-tests/assets/service_broker/setup_new_broker.rb

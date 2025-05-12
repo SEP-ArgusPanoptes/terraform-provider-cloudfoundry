@@ -1,1 +1,1 @@
- 2yamlX"hr.golangci.yml
+ 2yamlX"hr.golangci.yml

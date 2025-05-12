@@ -1,0 +1,1 @@
+ý 2jsonXãhr<tests/cf-acceptance-tests/assets/service_broker/example.json

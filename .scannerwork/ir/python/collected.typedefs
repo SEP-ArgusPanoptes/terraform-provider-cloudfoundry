@@ -21,13 +21,13 @@ astimezonedatetime.datetime.astimezoneÕdatetime.date*"
 __init__builtins._StubIterator.__init__•migrate_tf_cf.Converter*,
 __init__ migrate_tf_cf.Converter.__init__*J
 convert_cf2cloudfoundry/migrate_tf_cf.Converter.convert_cf2cloudfoundry¼migrate_tf_cf.JSONConvertermigrate_tf_cf.Converter*h
-$remove_disable_blue_green_deployment@migrate_tf_cf.JSONConverter.remove_disable_blue_green_deployment*H
-__remove_attribute__0migrate_tf_cf.JSONConverter.__remove_attribute__*N
-remove_recursive_delete3migrate_tf_cf.JSONConverter.remove_recursive_delete*N
-convert_cf2cloudfoundry3migrate_tf_cf.JSONConverter.convert_cf2cloudfoundry*.
-migrate#migrate_tf_cf.JSONConverter.migratePtyping.Mappingtyping.Collectiontyping.Containertyping.Iterableobjectgtyping.MutableMappingtyping.Mappingtyping.Collectiontyping.Containertyping.Iterableobjectmdicttyping.MutableMappingtyping.Mappingtyping.Collectiontyping.Containertyping.Iterableobject,typing.Iteratorobjecttyping.Iterableímigrate_tf_cf.HCLConvertermigrate_tf_cf.Converter*M
-remove_recursive_delete2migrate_tf_cf.HCLConverter.remove_recursive_delete*-
-migrate"migrate_tf_cf.HCLConverter.migrate*g
-$remove_disable_blue_green_deployment?migrate_tf_cf.HCLConverter.remove_disable_blue_green_deployment*M
-convert_cf2cloudfoundry2migrate_tf_cf.HCLConverter.convert_cf2cloudfoundry
+$remove_disable_blue_green_deployment@migrate_tf_cf.JSONConverter.remove_disable_blue_green_deployment*.
+migrate#migrate_tf_cf.JSONConverter.migrate*N
+convert_cf2cloudfoundry3migrate_tf_cf.JSONConverter.convert_cf2cloudfoundry*N
+remove_recursive_delete3migrate_tf_cf.JSONConverter.remove_recursive_delete*H
+__remove_attribute__0migrate_tf_cf.JSONConverter.__remove_attribute__Ptyping.Mappingtyping.Collectiontyping.Containertyping.Iterableobjectgtyping.MutableMappingtyping.Mappingtyping.Collectiontyping.Containertyping.Iterableobjectmdicttyping.MutableMappingtyping.Mappingtyping.Collectiontyping.Containertyping.Iterableobject,typing.Iteratorobjecttyping.Iterableímigrate_tf_cf.HCLConvertermigrate_tf_cf.Converter*-
+migrate"migrate_tf_cf.HCLConverter.migrate*M
+remove_recursive_delete2migrate_tf_cf.HCLConverter.remove_recursive_delete*M
+convert_cf2cloudfoundry2migrate_tf_cf.HCLConverter.convert_cf2cloudfoundry*g
+$remove_disable_blue_green_deployment?migrate_tf_cf.HCLConverter.remove_disable_blue_green_deployment
 re.Patternobjectktupletyping.Sequencetyping.Collectiontyping.Containertyping.Iterableobjecttyping.Reversible%argparse._AttributeHolderobject&argparse._ActionsContainerobjectZargparse.ArgumentParserargparse._ActionsContainerargparse._AttributeHolderobject

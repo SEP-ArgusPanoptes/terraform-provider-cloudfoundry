@@ -1,0 +1,1 @@
+ú 2jsonX‡hr9tests/cf-acceptance-tests/assets/service_broker/cats.json

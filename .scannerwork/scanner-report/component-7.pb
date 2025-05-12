@@ -1,1 +1,1 @@
- 2yamlX=hr.goreleaser.yml
+ 2yamlX=hr.goreleaser.yml
